@@ -1,0 +1,65 @@
+{
+  "name": "@parallax/opencode",
+  "version": "0.2.0",
+  "description": "PARALLAX ENGINE plugin for OpenCode -- friction-loop verification, mode switching (plan/build/debug), multi-perspective reasoning, and the 4 invariants framework",
+  "type": "module",
+  "main": "./dist/plugin.js",
+  "types": "./dist/plugin.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/plugin.js",
+      "types": "./dist/plugin.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "dist-standalone",
+    "agents",
+    "skills",
+    "scripts",
+    "postinstall.mjs",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node postinstall.mjs",
+    "install": "node scripts/install.mjs",
+    "publish": "node scripts/publish.mjs",
+    "publish:dry": "node scripts/publish.mjs --dry-run",
+    "publish:patch": "node scripts/publish.mjs --patch",
+    "build": "tsc --project tsconfig.build.json",
+    "build:standalone": "npx esbuild src/plugin.ts --bundle --outfile=dist-standalone/parallax-engine.js --platform=node --format=esm --external:@opencode-ai/plugin && node -e \"require('fs').copyFileSync('dist/plugin.d.ts', 'dist-standalone/parallax-engine.d.ts')\"",
+    "build:all": "npm run build && npm run build:standalone",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "bin": {
+    "parallax": "./dist/cli.js",
+    "parallax-opencode": "./scripts/install.mjs"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "parallax",
+    "friction-loop",
+    "verification",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Master0fFate/parallax-opencode"
+  },
+  "homepage": "https://github.com/Master0fFate/parallax-opencode",
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.14.20",
+    "@xhayper/discord-rpc": "^1.3.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "bun-types": "^1.3.14",
+    "esbuild": "^0.27.7",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4"
+  }
+}

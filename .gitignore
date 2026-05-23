@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Compiled output
+dist/
+dist-standalone/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+*.swp
+*.swo
+
+# Parallax runtime state (changes every session)
+.parallax/state.json
+
+# Parallax local traces (keep dir, ignore contents)
+.parallax/traces/*.json
+!.parallax/traces/.gitkeep
+
+# MCP / runtime databases
+data/*.db
+data/*.sqlite
+
+# Test coverage
+coverage/
