@@ -44,6 +44,8 @@ Every action is checked against four questions:
 | What breaks if I delete this? | Coupling & fragility, safe refactoring |
 | When does timing matter? | Async & ordering, race conditions, correctness |
 
+Based on [@acidgreenservers AGENTS.md](https://gist.github.com/acidgreenservers/001185d63e5cd65f9fbe6f7a1c70a200)
+
 ### The Coherence Score
 
 After every session, Parallax computes an evidence-based quality score (0-100):
