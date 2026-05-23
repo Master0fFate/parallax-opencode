@@ -26,7 +26,7 @@ function checkLogin() {
 
 function checkPackageJson() {
   const checks = [
-    ["name", pkg.name === "@parallax/opencode"],
+    ["name", pkg.name === "parallax-opencode"],
     ["version", typeof pkg.version === "string"],
     ["license", pkg.license === "MIT"],
     ["main", pkg.main === "./dist/plugin.js"],

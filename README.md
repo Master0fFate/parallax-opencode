@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![OpenCode](https://img.shields.io/badge/OpenCode-plugin-6c63ff)](https://opencode.ai)
-[![npm](https://img.shields.io/npm/v/@parallax/opencode)](https://www.npmjs.com/package/@parallax/opencode)
+[![npm](https://img.shields.io/npm/v/parallax-opencode)](https://www.npmjs.com/package/parallax-opencode)
 [![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)]()
 
@@ -16,7 +16,7 @@
 
 ```bash
 # One command -- installs agent, plugin, skills, and dependencies
-npx @parallax/opencode
+npx parallax-opencode
 ```
 
 After install, restart OpenCode and press **Tab** in the TUI to cycle to the Parallax agent.

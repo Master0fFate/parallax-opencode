@@ -1,5 +1,5 @@
 {
-  "name": "@parallax/opencode",
+  "name": "parallax-opencode",
   "version": "0.2.0",
   "description": "PARALLAX ENGINE plugin for OpenCode -- friction-loop verification, mode switching (plan/build/debug), multi-perspective reasoning, and the 4 invariants framework",
   "type": "module",
@@ -23,9 +23,9 @@
   "scripts": {
     "postinstall": "node postinstall.mjs",
     "install": "node scripts/install.mjs",
-    "publish": "node scripts/publish.mjs",
-    "publish:dry": "node scripts/publish.mjs --dry-run",
-    "publish:patch": "node scripts/publish.mjs --patch",
+    "release": "node scripts/publish.mjs",
+    "release:dry": "node scripts/publish.mjs --dry-run",
+    "release:patch": "node scripts/publish.mjs --patch",
     "build": "tsc --project tsconfig.build.json",
     "build:standalone": "npx esbuild src/plugin.ts --bundle --outfile=dist-standalone/parallax-engine.js --platform=node --format=esm --external:@opencode-ai/plugin && node -e \"require('fs').copyFileSync('dist/plugin.d.ts', 'dist-standalone/parallax-engine.d.ts')\"",
     "build:all": "npm run build && npm run build:standalone",
@@ -34,8 +34,8 @@
     "test:watch": "vitest"
   },
   "bin": {
-    "parallax": "./dist/cli.js",
-    "parallax-opencode": "./scripts/install.mjs"
+    "parallax": "dist/cli.js",
+    "parallax-opencode": "scripts/install.mjs"
   },
   "keywords": [
     "opencode",
@@ -48,7 +48,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Master0fFate/parallax-opencode"
+    "url": "git+https://github.com/Master0fFate/parallax-opencode.git"
   },
   "homepage": "https://github.com/Master0fFate/parallax-opencode",
   "dependencies": {

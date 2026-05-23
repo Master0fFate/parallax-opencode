@@ -101,7 +101,7 @@ function registerPlugin() {
 
     // Check if already registered (by name or path)
     const alreadyRegistered = config.plugin.some(
-      (p) => p === pluginEntry || p === "parallax-engine" || p === "@parallax/opencode",
+      (p) => p === pluginEntry || p === "parallax-engine" || p === "parallax-opencode",
     )
 
     if (alreadyRegistered) {
