@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 /**
  * PARALLAX ENGINE -- CLI Entry Point
  *
