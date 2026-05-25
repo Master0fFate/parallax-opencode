@@ -774,6 +774,22 @@ export default {
         // Initialize trace with session info
         if (currentSessionId) {
           initTrace(currentSessionId, process.cwd(), detectProject())
+
+        // Carry over protocol state from default if checkins happened before
+        // the session.created event fired (common race on session start).
+        if (protocolStore.has("default")) {
+          protocolStore.set(currentSessionId!, protocolStore.get("default")!)
+          protocolStore.delete("default")
+        }
+        if (frictionStore.has("default")) {
+          frictionStore.set(currentSessionId!, frictionStore.get("default")!)
+          frictionStore.delete("default")
+        }
+        if (modeStore.has("default")) {
+          modeStore.set(currentSessionId!, modeStore.get("default")!)
+          modeStore.delete("default")
+        }
+
           writeState()
         }
       }
