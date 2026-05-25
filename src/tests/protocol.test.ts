@@ -7,6 +7,7 @@ interface ProtocolTestState {
   ambiguityDone: boolean
   invariantsDone: boolean
   gateDone: boolean
+  designDone: boolean
   commitDone: boolean
   summaryDone: boolean
   writesBeforeGate: number
@@ -26,6 +27,7 @@ function createProtocol(): ProtocolTestState {
     ambiguityDone: false,
     invariantsDone: false,
     gateDone: false,
+    designDone: false,
     commitDone: false,
     summaryDone: false,
     writesBeforeGate: 0,

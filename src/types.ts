@@ -14,7 +14,7 @@
 
 export type AgentMode = "free" | "plan" | "build" | "debug"
 
-export type ProtocolStep = "ambiguity" | "invariants" | "gate" | "commit" | "summary"
+export type ProtocolStep = "ambiguity" | "invariants" | "gate" | "design" | "commit" | "summary"
 
 export type ProjectType = "cargo" | "tsc" | "lint" | "python" | null
 
@@ -37,6 +37,7 @@ export interface ProtocolState {
   ambiguityDone: boolean
   invariantsDone: boolean
   gateDone: boolean
+  designDone: boolean
   commitDone: boolean
   summaryDone: boolean
   writesBeforeGate: number
@@ -62,6 +63,7 @@ export type PhaseName =
   | "ambiguity_check"
   | "four_invariants"
   | "verification_gate"
+  | "design_check"
   | "mode_switch"
   | "execution"
   | "commit_decision"
@@ -139,4 +141,17 @@ export interface CliCommand {
   description: string
   usage: string
   run: (args: string[]) => Promise<number>
+}
+
+// ---------------------------------------------------------------------------
+// Config types
+// ---------------------------------------------------------------------------
+
+export interface ParallaxConfig {
+  strictness?: "strict" | "standard" | "relaxed"
+  minScore?: number
+  adaptiveProtocol?: boolean
+  designDocRequired?: boolean
+  trivialPatterns?: string[]
+  highRiskPatterns?: string[]
 }

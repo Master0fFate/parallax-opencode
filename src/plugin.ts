@@ -11,7 +11,7 @@
  */
 
 import { type PluginModule, tool } from "@opencode-ai/plugin"
-import { readFileSync } from "fs"
+import { readFileSync, writeFileSync, existsSync } from "fs"
 import { homedir } from "os"
 import { join } from "path"
 
@@ -21,6 +21,7 @@ import type {
   FrictionState,
   ModeState,
   ProtocolState,
+  ParallaxConfig,
 } from "./types"
 import { detectProject, runVerify } from "./detect"
 import {
@@ -31,17 +32,16 @@ import {
   getTrace,
 } from "./trace"
 import { computeCoherenceScore } from "./score"
-import { initDiscordRpc, getDiscordRpc, destroyDiscordRpc, resolveAgent } from "./discord-rpc"
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const MAX_FRICTION_RETRIES = 3
-// ## BROKEN -- Discord RPC never shows presence. See src/discord-rpc.ts
-const DISCORD_RPC_ENABLED = process.env.PARALLAX_DISCORD_RPC !== "false"
 const CHECK_DEBOUNCE_MS = 1000
+const STATE_DEBOUNCE_MS = 100
 const CONFIG_DIR = join(homedir(), ".config", "opencode")
+const STATE_FILE = join(".parallax", "state.json")
+const CONFIG_FILE = join(".parallax", "config.json")
 
 // ---------------------------------------------------------------------------
 // Module-level stores
@@ -82,6 +82,7 @@ function getProtocol(s: string = sessionId()): ProtocolState {
       ambiguityDone: false,
       invariantsDone: false,
       gateDone: false,
+      designDone: false,
       commitDone: false,
       summaryDone: false,
       writesBeforeGate: 0,
@@ -89,6 +90,69 @@ function getProtocol(s: string = sessionId()): ProtocolState {
     })
   }
   return protocolStore.get(s)!
+}
+
+// ---------------------------------------------------------------------------
+// Config loader
+// ---------------------------------------------------------------------------
+
+let configCache: ParallaxConfig | null = null
+let configCacheLoaded = false
+
+function loadConfig(): ParallaxConfig {
+  if (configCacheLoaded) return configCache || {}
+  configCacheLoaded = true
+  try {
+    if (existsSync(CONFIG_FILE)) {
+      const raw = readFileSync(CONFIG_FILE, "utf8")
+      configCache = JSON.parse(raw) as ParallaxConfig
+    }
+  } catch {
+    // Invalid JSON or missing file -> use defaults
+  }
+  return configCache || {}
+}
+
+// ---------------------------------------------------------------------------
+// State persistence (Phase 2.1)
+// ---------------------------------------------------------------------------
+
+let stateDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+function writeState(): void {
+  if (stateDebounceTimer) clearTimeout(stateDebounceTimer)
+  stateDebounceTimer = setTimeout(() => {
+    stateDebounceTimer = null
+    try {
+      const s = getFriction()
+      const m = getMode()
+      const p = getProtocol()
+      const state = {
+        sessionId: currentSessionId,
+        sessionStart: getTrace(sessionId()).session.startedAt,
+        mode: m.mode,
+        friction: {
+          successes: s.successes,
+          trials: s.trials,
+          retriesLeft: s.retriesLeft,
+          lastObservation: s.lastObservation,
+        },
+        protocol: {
+          ambiguityDone: p.ambiguityDone,
+          invariantsDone: p.invariantsDone,
+          gateDone: p.gateDone,
+          designDone: p.designDone,
+          commitDone: p.commitDone,
+          summaryDone: p.summaryDone,
+          writesBeforeGate: p.writesBeforeGate,
+          gateBlocked: p.gateBlocked,
+        },
+      }
+      writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8")
+    } catch {
+      // Best-effort: don't crash the plugin if disk is full
+    }
+  }, STATE_DEBOUNCE_MS)
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +190,7 @@ const STEP_LABELS: Record<ProtocolStep, string> = {
   ambiguity: "Ambiguity Check",
   invariants: "4 Invariants",
   gate: "Verification Gate",
+  design: "Design Doc",
   commit: "Commit Decision",
   summary: "Summarize",
 }
@@ -155,10 +220,6 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null
 export default {
   id: "parallax-engine",
   server: async ({ client }) => {
-    if (DISCORD_RPC_ENABLED) {
-      initDiscordRpc().catch(() => {})
-    }
-
     return {
     // -----------------------------------------------------------------------
     // Custom tools
@@ -228,7 +289,7 @@ export default {
           "the protocol order. Call this after completing each step.",
         args: {
           step: tool.schema.string().describe(
-            "The protocol step to mark complete: ambiguity, invariants, gate, commit, summary",
+            "The protocol step to mark complete: ambiguity, invariants, gate, design, commit, summary",
           ),
         },
         async execute(args: { step: string }) {
@@ -243,11 +304,13 @@ export default {
           }
 
           const sid = sessionId()
+          const cfg = loadConfig()
 
           // Enforce ordering
           if (step === "ambiguity" && !p.ambiguityDone) {
             p.ambiguityDone = true
             addPhase(sid, "ambiguity_check")
+            writeState()
             return "[parallax] Step 1/6: Ambiguity Check marked complete."
           }
           if (step === "invariants") {
@@ -256,6 +319,7 @@ export default {
             }
             p.invariantsDone = true
             addPhase(sid, "four_invariants")
+            writeState()
             return "[parallax] Step 2/6: 4 Invariants marked complete."
           }
           if (step === "gate") {
@@ -264,17 +328,59 @@ export default {
             }
             p.gateDone = true
             addPhase(sid, "verification_gate")
+            writeState()
             return "[parallax] Step 3/6: Verification Gate marked complete."
+          }
+          if (step === "design") {
+            if (!p.gateDone && cfg.designDocRequired) {
+              return "[parallax] ERROR: Complete Verification Gate first (Step 3)."
+            }
+            p.designDone = true
+            addPhase(sid, "design_check")
+            writeState()
+            return "[parallax] Step 4/6: Design Doc marked complete."
           }
           if (step === "commit") {
             p.commitDone = true
             addPhase(sid, "commit_decision")
+            writeState()
             return "[parallax] Step 5/6: Commit Decision marked complete."
           }
           if (step === "summary") {
             p.summaryDone = true
             addPhase(sid, "summary")
-            return "[parallax] Step 6/6: Summary marked complete. Protocol finished."
+            writeState()
+
+            // Phase 2.3: Post-session retrospective
+            const trace = getTrace(sid)
+            const breakdown = computeCoherenceScore(trace)
+            const s = getFriction()
+            const passCount = trace.writes.filter((w) => w.verification === "pass").length
+            const failCount = trace.writes.filter((w) => w.verification === "fail").length
+
+            const retrospective = [
+              `[parallax] Step 6/6: Summary marked complete. Protocol finished.`,
+              ``,
+              `## Session Retrospective`,
+              ``,
+              `**What was built:** ${trace.writes.length} writes across ${trace.phases.length} phases`,
+              `**Verification:** ${passCount} passed, ${failCount} failed`,
+              `**Coherence Score:** ${breakdown.total}/100`,
+              `**Friction:** ${s.successes} ok / ${s.trials} trials, ${s.retriesLeft} retries remaining`,
+              ``,
+              `**Review Focus:**`,
+              failCount > 0
+                ? `- ${failCount} verification failures -- review the failed files`
+                : `- No verification failures`,
+              breakdown.total < 60
+                ? `- Low coherence score (${breakdown.total}/100) -- protocol steps may have been skipped`
+                : ``,
+              breakdown.edgeCaseCoverage < 10
+                ? `- Low edge case coverage (${breakdown.edgeCaseCoverage}/20) -- consider running parallax_analyze on critical paths`
+                : ``,
+            ].filter(Boolean).join("\n")
+
+            return retrospective
           }
           if (p[`${step}Done` as keyof ProtocolState]) {
             return `[parallax] Step "${step}" was already completed.`
@@ -294,6 +400,7 @@ export default {
         async execute() {
           getMode().mode = "plan"
           addPhase(sessionId(), "mode_switch", { mode: "plan" })
+          writeState()
           return (
             "[parallax] PLAN mode activated. Precision Architect skill loaded. " +
             "Elicit requirements fully before building."
@@ -311,6 +418,7 @@ export default {
         async execute() {
           getMode().mode = "build"
           addPhase(sessionId(), "mode_switch", { mode: "build" })
+          writeState()
           return (
             "[parallax] BUILD mode activated. Standard Parallax execution protocol. " +
             "Write clean code, verify with parallax_verify."
@@ -328,6 +436,7 @@ export default {
         async execute() {
           getMode().mode = "debug"
           addPhase(sessionId(), "mode_switch", { mode: "debug" })
+          writeState()
           return (
             "[parallax] DEBUG mode activated. Universal Auditor skill loaded. " +
             "Run a full audit pass."
@@ -364,6 +473,153 @@ export default {
           )
         },
       }),
+
+      // TRACE PR COMMENT -- generates markdown for PR description (Phase 1.1)
+      parallax_trace_pr_comment: tool({
+        description:
+          "Generate a formatted markdown summary of the current session trace " +
+          "suitable for pasting into a GitHub PR comment. Shows coherence score, " +
+          "protocol phases completed, write verification summary, and friction stats. " +
+          "The AI should call this at session end and paste the output into the PR.",
+        args: {},
+        async execute() {
+          const sid = sessionId()
+          const trace = getTrace(sid)
+          const breakdown = computeCoherenceScore(trace)
+          const s = getFriction()
+
+          if (trace.writes.length === 0) {
+            return (
+              `## Parallax Trace -- Planning Session\n\n` +
+              `**Session:** ${sid}\n` +
+              `**Protocol Steps:** ${trace.phases.length} phases recorded\n` +
+              `**Coherence Score:** ${breakdown.total}/100\n\n` +
+              `*No code was written in this session.*`
+            )
+          }
+
+          const passCount = trace.writes.filter((w) => w.verification === "pass").length
+          const failCount = trace.writes.filter((w) => w.verification === "fail").length
+          const passRate = trace.writes.length > 0
+            ? Math.round((passCount / trace.writes.length) * 100)
+            : 0
+
+          const phaseTimeline = trace.phases
+            .filter((p) => p.phase !== "execution" && p.phase !== "mode_switch")
+            .map((p) => {
+              const label = p.phase.replace(/_/g, " ")
+              return `- [x] ${label} (${p.timestamp.slice(11, 19)})`
+            })
+            .join("\n")
+
+          const writeSummary = trace.writes
+            .slice(0, 20)
+            .map((w) => {
+              const icon = w.verification === "pass" ? "[OK]" : w.verification === "fail" ? "[FAIL]" : "[SKIP]"
+              const file = w.file.length > 60 ? "..." + w.file.slice(-57) : w.file
+              return `- ${icon} \`${file}\``
+            })
+            .join("\n")
+
+          const more = trace.writes.length > 20
+            ? `\n*...and ${trace.writes.length - 20} more writes*\n`
+            : ""
+
+          return [
+            `## Parallax Trace`,
+            ``,
+            `| Metric | Value |`,
+            `|---|---|`,
+            `| **Coherence Score** | **${breakdown.total}/100** |`,
+            `| Protocol Coverage | ${breakdown.protocolCoverage}/30 |`,
+            `| Verification Integrity | ${breakdown.verificationIntegrity}/35 |`,
+            `| Edge Case Coverage | ${breakdown.edgeCaseCoverage}/20 |`,
+            `| Timing Discipline | ${breakdown.timingDiscipline}/15 |`,
+            ``,
+            `**Session:** \`${sid}\``,
+            ``,
+            `### Protocol Phases`,
+            phaseTimeline,
+            ``,
+            `### Verification Summary`,
+            `- ${passCount} passed, ${failCount} failed (${passRate}% pass rate)`,
+            `- ${s.trials} trials, ${s.successes} successes`,
+            `- Friction retries consumed: ${3 - s.retriesLeft}`,
+            ``,
+            `### Files Changed`,
+            writeSummary,
+            more,
+            ``,
+            `> Full trace: \`.parallax/traces/${sid}.json\``,
+          ].join("\n")
+        },
+      }),
+
+      // TRACE VIEW -- inline trace viewer (Phase 1.2)
+      parallax_trace_view: tool({
+        description:
+          "Show the current session's complete reasoning trace in the chat. " +
+          "Displays ambiguity assessment, 4 invariants analysis, verification gate " +
+          "results, every write with pass/fail status, commit decision, and summary. " +
+          "Use this when the user asks to see the trace.",
+        args: {},
+        async execute() {
+          const sid = sessionId()
+          const trace = getTrace(sid)
+          const breakdown = computeCoherenceScore(trace)
+          const s = getFriction()
+          const p = getProtocol()
+
+          const stepStatus = (done: boolean, label: string) =>
+            done ? `[DONE] ${label}` : `[PENDING] ${label}`
+
+          const writesList = trace.writes.length === 0
+            ? "*No writes recorded yet.*"
+            : trace.writes
+                .slice(-30)
+                .map((w) => {
+                  const icon = w.verification === "pass" ? "OK" : w.verification === "fail" ? "FAIL" : "SKIP"
+                  const file = w.file.length > 80 ? "..." + w.file.slice(-77) : w.file
+                  return `  ${icon} | ${file} | retries left: ${w.frictionRetriesLeft}`
+                })
+                .join("\n")
+
+          const more = trace.writes.length > 30
+            ? `\n  ... and ${trace.writes.length - 30} more writes (see full trace at .parallax/traces/${sid}.json)`
+            : ""
+
+          return [
+            `## Parallax Session Trace`,
+            `**Session:** \`${sid}\``,
+            `**Mode:** ${getMode().mode.toUpperCase()}`,
+            ``,
+            `### Coherence Score: ${breakdown.total}/100`,
+            `  Protocol Coverage:     ${breakdown.protocolCoverage}/30`,
+            `  Verification Integrity: ${breakdown.verificationIntegrity}/35`,
+            `  Edge Case Coverage:    ${breakdown.edgeCaseCoverage}/20`,
+            `  Timing Discipline:     ${breakdown.timingDiscipline}/15`,
+            ``,
+            `### Protocol Progress`,
+            `  ${stepStatus(p.ambiguityDone, "1. Ambiguity Check")}`,
+            `  ${stepStatus(p.invariantsDone, "2. 4 Invariants")}`,
+            `  ${stepStatus(p.gateDone, "3. Verification Gate")}`,
+            `  ${stepStatus(p.designDone, "4. Design Doc (optional)")}`,
+            `  ${stepStatus(p.commitDone, "5. Commit Decision")}`,
+            `  ${stepStatus(p.summaryDone, "6. Summary")}`,
+            ``,
+            `### Friction`,
+            `  Successes: ${s.successes} / Trials: ${s.trials}`,
+            `  Retries remaining: ${s.retriesLeft}`,
+            s.lastObservation ? `  Last error: ${s.lastObservation.slice(0, 200)}` : "",
+            ``,
+            `### Writes (last 30)`,
+            writesList,
+            more,
+            ``,
+            `> Full trace JSON: \`.parallax/traces/${sid}.json\``,
+          ].filter(Boolean).join("\n")
+        },
+      }),
     },
 
     // -----------------------------------------------------------------------
@@ -373,18 +629,8 @@ export default {
     "tool.execute.before": async (input: { tool: string }) => {
       if (!["write", "edit", "apply_patch"].includes(input.tool)) return
 
-      if (DISCORD_RPC_ENABLED) {
-        const rpc = getDiscordRpc()
-        if (rpc.connected) {
-          rpc.updatePresence({
-            status: "coding",
-            mode: getMode().mode,
-            agent: resolveAgent(currentAgentName),
-          }).catch(() => {})
-        }
-      }
-
       const p = getProtocol()
+      const cfg = loadConfig()
 
       // Enforce ambiguity check before any write
       if (!p.ambiguityDone) {
@@ -396,9 +642,20 @@ export default {
         )
       }
 
+      // Phase 3.2: Design doc enforcement (opt-in)
+      if (cfg.designDocRequired && !p.designDone && p.invariantsDone && !process.env.PARALLAX_FORCE) {
+        throw new Error(
+          `[parallax] PROTOCOL VIOLATION: Design Doc (Step 4) required by project config.\n` +
+          `Complete a design document before writing code for non-trivial changes.\n` +
+          `Use parallax_checkin({ step: "design" }) after completing it.\n` +
+          `Override: set PARALLAX_FORCE=1 to bypass.`,
+        )
+      }
+
       // Warn after 3 writes without invariants checkin
       if (!p.invariantsDone) {
         p.writesBeforeGate++
+        writeState()
         if (p.writesBeforeGate > 3) {
           throw new Error(
             `[parallax] PROTOCOL VIOLATION: 4 Invariants (Step 2) not completed ` +
@@ -430,17 +687,6 @@ export default {
     }) => {
       if (!["write", "edit", "apply_patch"].includes(input.tool)) return
 
-      if (DISCORD_RPC_ENABLED) {
-        const rpc = getDiscordRpc()
-        if (rpc.connected) {
-          rpc.updatePresence({
-            status: "coding",
-            mode: getMode().mode,
-            agent: resolveAgent(currentAgentName),
-          }).catch(() => {})
-        }
-      }
-
       const s = getFriction()
       if (s.retriesLeft === 0) return
 
@@ -468,6 +714,7 @@ export default {
           s.retriesLeft = MAX_FRICTION_RETRIES
           s.lastObservation = null
           addWrite(sid, fileName, "pass", s.retriesLeft)
+          writeState()
           client.app
             .log({
               body: {
@@ -481,6 +728,7 @@ export default {
           s.retriesLeft--
           s.lastObservation = truncate(result.combined, 2000)
           addWrite(sid, fileName, "fail", s.retriesLeft)
+          writeState()
           const lvl = s.retriesLeft === 0 ? "error" : "warn"
           client.app
             .log({
@@ -521,6 +769,7 @@ export default {
         // Initialize trace with session info
         if (currentSessionId) {
           initTrace(currentSessionId, process.cwd(), detectProject())
+          writeState()
         }
       }
 
@@ -530,121 +779,18 @@ export default {
         currentAgentName = (props?.agent as string) || null
       }
 
-      // Discord RPC: track session lifecycle
-      if (DISCORD_RPC_ENABLED) {
-        const rpc = getDiscordRpc()
-        const agent = resolveAgent(currentAgentName)
-        switch (input.event.type) {
-          case "session.created": {
-            rpc.startSession()
-            rpc.updatePresence({
-              status: "coding",
-              mode: getMode().mode,
-              agent,
-            }).catch(() => {})
-            break
-          }
-          case "session.status": {
-            const props = input.event.properties as
-              | { status?: { type?: string } }
-              | undefined
-            const statusType = props?.status?.type
-            if (statusType === "busy") {
-              rpc.updatePresence({
-                status: "coding",
-                mode: getMode().mode,
-                agent,
-              }).catch(() => {})
-            } else if (statusType === "idle") {
-              rpc.updatePresence({
-                status: "waiting",
-                mode: getMode().mode,
-                agent,
-              }).catch(() => {})
-            }
-            break
-          }
-          case "session.deleted": {
-            rpc.clearPresence().catch(() => {})
-            rpc.clearSession()
-            break
-          }
-          case "session.idle": {
-            rpc.updatePresence({
-              status: "idle",
-              mode: getMode().mode,
-              agent,
-            }).catch(() => {})
-            break
-          }
-          case "message.part.updated": {
-            rpc.updatePresence({
-              status: "thinking",
-              mode: getMode().mode,
-              agent,
-            }).catch(() => {})
-            break
-          }
-        }
-      }
     },
 
     // -----------------------------------------------------------------------
-    // Chat hooks: detect model for Discord RPC
+    // Shell environment injection (Phase 2.6)
     // -----------------------------------------------------------------------
 
-    "chat.message": async (input: {
-      sessionID: string
-      agent?: string
-      model?: { modelID?: string }
-    }) => {
-      if (!DISCORD_RPC_ENABLED) return
-      const rpc = getDiscordRpc()
-      if (!rpc.connected) return
-
-      // Agent name comes directly from the hook input (v2 SDK)
-      if (input.agent) currentAgentName = input.agent
-
-      let modelName: string | undefined
-      if (input.model?.modelID) {
-        modelName = input.model.modelID
-          .replace(/-\d{4}-\d{2}-\d{2}$/, "")
-          .replace(/-\d{8}$/, "")
-      }
-
-      rpc.updatePresence({
-        status: "thinking",
-        modelName,
-        mode: getMode().mode,
-        agent: resolveAgent(currentAgentName),
-      }).catch(() => {})
-    },
-
-    "chat.params": async (input: {
-      sessionID: string
-      agent: string
-      model: { id: string }
-    }) => {
-      if (!DISCORD_RPC_ENABLED) return
-      const rpc = getDiscordRpc()
-      if (!rpc.connected) return
-
-      // Agent name is required in chat.params
-      currentAgentName = input.agent
-
-      let modelName: string | undefined
-      if (input.model?.id) {
-        modelName = input.model.id
-          .replace(/-\d{4}-\d{2}-\d{2}$/, "")
-          .replace(/-\d{8}$/, "")
-      }
-
-      rpc.updatePresence({
-        status: "thinking",
-        modelName,
-        mode: getMode().mode,
-        agent: resolveAgent(currentAgentName),
-      }).catch(() => {})
+    "shell.env": async (input: { cwd: string; sessionID?: string }, output: { env: Record<string, string> }) => {
+      const m = getMode()
+      const s = getFriction()
+      output.env.PARALLAX_MODE = m.mode
+      output.env.PARALLAX_SESSION_ID = currentSessionId || ""
+      output.env.PARALLAX_FRICTION_RETRIES = String(s.retriesLeft)
     },
 
     // -----------------------------------------------------------------------
@@ -659,12 +805,28 @@ export default {
       const s = getFriction()
       const p = getProtocol()
 
+      // Phase 2.5: Multi-agent protocol sharing -- carry state to new agent
+      if (currentAgentName) {
+        const sys = output.system || (output.system = [])
+        sys.push(
+          `\n## PARALLAX AGENT CONTEXT\n` +
+          `You are now operating as agent "${currentAgentName}". ` +
+          `Parallax protocol state carries over:\n` +
+          `- Mode: ${m.mode.toUpperCase()}\n` +
+          `- Ambiguity: ${p.ambiguityDone ? "DONE" : "PENDING"}\n` +
+          `- Invariants: ${p.invariantsDone ? "DONE" : "PENDING"}\n` +
+          `- Gate: ${p.gateDone ? "DONE" : "PENDING"}\n` +
+          `- Friction: ${s.retriesLeft} retries remaining`,
+        )
+      }
+
       // Build protocol status block
       const statusLines: string[] = []
       const steps: ProtocolStep[] = [
         "ambiguity",
         "invariants",
         "gate",
+        "design",
         "commit",
         "summary",
       ]

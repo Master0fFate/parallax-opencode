@@ -1,7 +1,7 @@
 {
   "name": "parallax-opencode",
-  "version": "0.2.0",
-  "description": "PARALLAX ENGINE plugin for OpenCode -- friction-loop verification, mode switching (plan/build/debug), multi-perspective reasoning, and the 4 invariants framework",
+  "version": "0.3.0",
+  "description": "PARALLAX ENGINE plugin for OpenCode -- protocol enforcement, friction-loop verification, mode switching (plan/build/debug), trace recording, coherence scoring, CI gate, and PR-ready trace artifacts",
   "type": "module",
   "main": "./dist/plugin.js",
   "types": "./dist/plugin.d.ts",
@@ -52,8 +52,7 @@
   },
   "homepage": "https://github.com/Master0fFate/parallax-opencode",
   "dependencies": {
-    "@opencode-ai/plugin": "^1.14.20",
-    "@xhayper/discord-rpc": "^1.3.4"
+    "@opencode-ai/plugin": "^1.14.20"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

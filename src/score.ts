@@ -180,3 +180,81 @@ export function sparkline(scores: number[]): string {
   const max = Math.max(...scores, 1)
   return scores.map((s) => chars[Math.min(Math.floor((s / max) * (chars.length - 1)), chars.length - 1)]).join("")
 }
+
+// ---------------------------------------------------------------------------
+// Analytics / Phase 5
+// ---------------------------------------------------------------------------
+
+function getISOWeek(dateStr: string): string {
+  const d = new Date(dateStr)
+  const utc = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+  const dayNum = utc.getUTCDay() || 7
+  utc.setUTCDate(utc.getUTCDate() + 4 - dayNum)
+  const yearStart = new Date(Date.UTC(utc.getUTCFullYear(), 0, 1))
+  const weekNo = Math.ceil((((utc.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
+  return `${utc.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`
+}
+
+export function computeWeeklyReport(history: ScoreEntry[]): {
+  weekStart: string
+  avg: number
+  count: number
+  best: number
+  worst: number
+}[] {
+  const weeks = new Map<string, ScoreEntry[]>()
+  for (const entry of history) {
+    const week = getISOWeek(entry.date)
+    if (!weeks.has(week)) weeks.set(week, [])
+    weeks.get(week)!.push(entry)
+  }
+  return [...weeks.entries()]
+    .map(([week, entries]) => {
+      const scores = entries.map((e) => e.score)
+      return {
+        weekStart: week,
+        avg: Math.round(scores.reduce((a, b) => a + b, 0) / scores.length),
+        count: entries.length,
+        best: Math.max(...scores),
+        worst: Math.min(...scores),
+      }
+    })
+    .sort((a, b) => a.weekStart.localeCompare(b.weekStart))
+}
+
+export function detectFailurePatterns(trace: ParallaxTrace): {
+  file: string
+  failures: number
+}[] {
+  const grouped = new Map<string, number>()
+  for (const w of trace.writes) {
+    if (w.verification === "fail") {
+      grouped.set(w.file, (grouped.get(w.file) ?? 0) + 1)
+    }
+  }
+  return [...grouped.entries()]
+    .map(([file, failures]) => ({ file, failures }))
+    .sort((a, b) => b.failures - a.failures)
+}
+
+export function computePerProjectStats(history: ScoreEntry[]): {
+  project: string
+  sessions: number
+  avgScore: number
+}[] {
+  const grouped = new Map<string, ScoreEntry[]>()
+  for (const entry of history) {
+    const key = entry.project ?? "unknown"
+    if (!grouped.has(key)) grouped.set(key, [])
+    grouped.get(key)!.push(entry)
+  }
+  return [...grouped.entries()]
+    .map(([project, entries]) => ({
+      project,
+      sessions: entries.length,
+      avgScore: Math.round(
+        entries.reduce((a, e) => a + e.score, 0) / entries.length,
+      ),
+    }))
+    .sort((a, b) => b.sessions - a.sessions)
+}

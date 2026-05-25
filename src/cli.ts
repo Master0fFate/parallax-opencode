@@ -32,6 +32,9 @@ import {
   sparkline,
   scoreToGrade,
   recordScore,
+  computeWeeklyReport,
+  detectFailurePatterns,
+  computePerProjectStats,
 } from "./score"
 
 // ---------------------------------------------------------------------------
@@ -56,6 +59,11 @@ function showHelp(): void {
   console.log(`  trace score <id>      Show coherence score`)
   console.log(`  trace export <id>     Export trace to JSON file`)
   console.log(`  trace trend           Show score trend over time`)
+  console.log(`  trace report --week   Show weekly score report`)
+  console.log(`  trace compare <a> <b> Side-by-side comparison of two traces`)
+  console.log(`  trace compliance <id> Protocol compliance report`)
+  console.log(`  gate [--session <id>] [--last] [--min-score <n>]  Gate by coherence score`)
+  console.log(`  pre-commit            Pre-commit hook (runs gate --last --min-score 70)`)
   console.log(`  help                  Show this help`)
 }
 
@@ -199,6 +207,262 @@ async function cmdTraceTrend(): Promise<number> {
   return 0
 }
 
+async function cmdTraceReport(): Promise<number> {
+  const history = readScoreHistory()
+  if (history.length === 0) {
+    console.log("No score history found.")
+    return 0
+  }
+
+  const weeks = computeWeeklyReport(history)
+  console.log(`Weekly Report (${weeks.length} weeks):`)
+  for (const w of weeks) {
+    console.log(`  ${w.weekStart}: avg ${w.avg}/100 (${w.count} sessions, best: ${w.best}, worst: ${w.worst})`)
+  }
+  return 0
+}
+
+async function cmdTraceCompare(a: string, b: string): Promise<number> {
+  const traceA = loadTrace(a)
+  const traceB = loadTrace(b)
+
+  if (!traceA) {
+    console.error(`Trace not found: ${a}`)
+    return 1
+  }
+  if (!traceB) {
+    console.error(`Trace not found: ${b}`)
+    return 1
+  }
+
+  const scoreA = computeCoherenceScore(traceA)
+  const scoreB = computeCoherenceScore(traceB)
+
+  const passRate = (trace: typeof traceA): string => {
+    const known = trace.writes.filter((w) => w.verification !== "unknown")
+    if (known.length === 0) return "N/A"
+    const passes = known.filter((w) => w.verification === "pass").length
+    return `${Math.round((passes / known.length) * 100)}%`
+  }
+
+  const frictionRetries = (trace: typeof traceA): number =>
+    trace.writes.reduce((sum, w) => sum + (3 - w.frictionRetriesLeft), 0)
+
+  const rows: [string, string, string, string][] = [
+    [
+      "Coherence Score",
+      `${scoreA.total}/100 (${scoreToGrade(scoreA.total)})`,
+      `${scoreB.total}/100 (${scoreToGrade(scoreB.total)})`,
+      `${scoreB.total - scoreA.total >= 0 ? "+" : ""}${scoreB.total - scoreA.total}`,
+    ],
+    [
+      "Protocol Coverage",
+      `${scoreA.protocolCoverage}/30`,
+      `${scoreB.protocolCoverage}/30`,
+      `${scoreB.protocolCoverage - scoreA.protocolCoverage >= 0 ? "+" : ""}${scoreB.protocolCoverage - scoreA.protocolCoverage}`,
+    ],
+    [
+      "Verification Pass %",
+      passRate(traceA),
+      passRate(traceB),
+      "",
+    ],
+    [
+      "Writes",
+      `${traceA.writes.length}`,
+      `${traceB.writes.length}`,
+      `${traceB.writes.length - traceA.writes.length >= 0 ? "+" : ""}${traceB.writes.length - traceA.writes.length}`,
+    ],
+    [
+      "Friction Retries",
+      `${frictionRetries(traceA)}`,
+      `${frictionRetries(traceB)}`,
+      `${frictionRetries(traceB) - frictionRetries(traceA) >= 0 ? "+" : ""}${frictionRetries(traceB) - frictionRetries(traceA)}`,
+    ],
+  ]
+
+  const colWidths = [22, 17, 17, 7]
+  const pad = (text: string, width: number) => text.padEnd(width)
+
+  console.log("Trace Comparison:")
+  console.log(
+    `  ${pad("Metric", colWidths[0])} | ${pad("Session A", colWidths[1])} | ${pad("Session B", colWidths[2])} | Delta`,
+  )
+  console.log(
+    `  ${"-".repeat(colWidths[0])}-+-${"-".repeat(colWidths[1])}-+-${"-".repeat(colWidths[2])}-+-------`,
+  )
+  for (const row of rows) {
+    console.log(
+      `  ${pad(row[0], colWidths[0])} | ${pad(row[1], colWidths[1])} | ${pad(row[2], colWidths[2])} | ${row[3]}`,
+    )
+  }
+  return 0
+}
+
+async function cmdTraceCompliance(id: string): Promise<number> {
+  const trace = loadTrace(id)
+  if (!trace) {
+    console.error(`Trace not found: ${id}`)
+    return 1
+  }
+
+  const REQUIRED_PHASES = [
+    "ambiguity_check",
+    "four_invariants",
+    "verification_gate",
+    "commit_decision",
+    "summary",
+  ] as const
+
+  const DISPLAY_NAMES: Record<string, string> = {
+    ambiguity_check: "Ambiguity Check",
+    four_invariants: "4 Invariants",
+    verification_gate: "Verification Gate",
+    commit_decision: "Commit Decision",
+    summary: "Summary",
+  }
+
+  const phaseByName = new Map(
+    trace.phases.map((p) => [p.phase, p]),
+  )
+
+  const invariantsPhase = phaseByName.get("four_invariants")
+
+  // Detect violations: writes before invariants completed
+  const violations: string[] = []
+  if (invariantsPhase) {
+    const invariantsTime = new Date(invariantsPhase.timestamp).getTime()
+    const writesBefore = trace.writes.filter(
+      (w) => new Date(w.timestamp).getTime() < invariantsTime,
+    )
+    if (writesBefore.length > 0) {
+      const fileList = writesBefore.map((w) => w.file).join(", ")
+      violations.push(
+        `${writesBefore.length} writes without invariants checkin (files: ${fileList})`,
+      )
+    }
+  } else {
+    violations.push(
+      `${trace.writes.length} writes without invariants checkin (files: ${trace.writes.map((w) => w.file).join(", ")})`,
+    )
+  }
+
+  console.log(`Protocol Compliance: ${id}`)
+  for (const phase of REQUIRED_PHASES) {
+    const record = phaseByName.get(phase)
+    const name = DISPLAY_NAMES[phase] ?? phase
+    if (record) {
+      console.log(`  [PASS] ${name.padEnd(20)} - completed at ${record.timestamp}`)
+    } else {
+      console.log(`  [FAIL] ${name.padEnd(20)} - not completed`)
+    }
+  }
+
+  if (violations.length > 0) {
+    console.log("")
+    console.log("  Violations:")
+    for (const v of violations) {
+      console.log(`  - ${v}`)
+    }
+  }
+  return 0
+}
+
+async function cmdGate(): Promise<number> {
+  const args = process.argv.slice(2)
+
+  let minScore = 70
+  let sessionId: string | null = null
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--min-score" && args[i + 1]) {
+      const val = parseInt(args[i + 1], 10)
+      if (!isNaN(val) && val >= 0 && val <= 100) {
+        minScore = val
+        i++
+      }
+    } else if (args[i] === "--session" && args[i + 1]) {
+      sessionId = args[i + 1]
+      i++
+    } else if (args[i] === "--last") {
+      // --last is the default behavior
+    }
+  }
+
+  if (sessionId) {
+    const trace = loadTrace(sessionId)
+    if (!trace) {
+      console.error(`Trace not found: ${sessionId}`)
+      return 1
+    }
+    const score = computeCoherenceScore(trace)
+    console.log(`Session: ${sessionId}`)
+    console.log(`Coherence Score: ${score.total}/100 (${scoreToGrade(score.total)})`)
+    console.log(`Threshold: ${minScore}/100`)
+    if (score.total >= minScore) {
+      console.log(`Result: PASS`)
+      return 0
+    }
+    console.log(`Result: FAIL`)
+    return 1
+  }
+
+  const files = listTraceFiles()
+  if (files.length === 0) {
+    console.error("No traces found")
+    return 2
+  }
+
+  files.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
+  const mostRecent = files[0]
+  const trace = loadTrace(mostRecent.sessionId)
+  if (!trace) {
+    console.error(`Failed to load trace: ${mostRecent.sessionId}`)
+    return 1
+  }
+
+  const score = computeCoherenceScore(trace)
+  console.log(`Session: ${mostRecent.sessionId}`)
+  console.log(`Coherence Score: ${score.total}/100 (${scoreToGrade(score.total)})`)
+  console.log(`Threshold: ${minScore}/100`)
+
+  if (score.total >= minScore) {
+    console.log(`Result: PASS`)
+    return 0
+  }
+  console.log(`Result: FAIL`)
+  return 1
+}
+
+async function cmdPreCommit(): Promise<number> {
+  const gitDir = join(process.cwd(), ".git")
+  if (!existsSync(gitDir)) {
+    console.log("Parallax pre-commit: skipped (not in a git repository)")
+    return 0
+  }
+
+  const files = listTraceFiles()
+  if (files.length === 0) {
+    console.log("Parallax pre-commit: skipped (no traces found)")
+    return 0
+  }
+
+  files.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
+  const mostRecent = files[0]
+  const trace = loadTrace(mostRecent.sessionId)
+  if (!trace) {
+    console.log("Parallax pre-commit: skipped (failed to load trace)")
+    return 0
+  }
+
+  const score = computeCoherenceScore(trace)
+  const pass = score.total >= 70
+
+  console.log(`Parallax gate: score ${score.total}/100 (${pass ? "PASS" : "FAIL"})`)
+
+  return pass ? 0 : 1
+}
+
 // ---------------------------------------------------------------------------
 // Command routing
 // ---------------------------------------------------------------------------
@@ -252,12 +516,32 @@ export async function main(): Promise<number> {
           return cmdTraceExport(args[2])
         case "trend":
           return cmdTraceTrend()
+        case "report":
+          return cmdTraceReport()
+        case "compare":
+          if (!args[2] || !args[3]) {
+            console.error("Usage: parallax trace compare <session-a> <session-b>")
+            return 1
+          }
+          return cmdTraceCompare(args[2], args[3])
+        case "compliance":
+          if (!args[2]) {
+            console.error("Usage: parallax trace compliance <session-id>")
+            return 1
+          }
+          return cmdTraceCompliance(args[2])
         default:
           console.error(`Unknown trace command: ${sub}`)
-          console.error("Usage: parallax trace <list|show|score|export|trend>")
+          console.error("Usage: parallax trace <list|show|score|export|trend|report|compare|compliance>")
           return 1
       }
     }
+
+    case "gate":
+      return cmdGate()
+
+    case "pre-commit":
+      return cmdPreCommit()
 
     default:
       console.error(`Unknown command: ${cmd}`)
