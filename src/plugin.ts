@@ -131,7 +131,10 @@ function writeState(): void {
     try {
       const s = getFriction()
       const m = getMode()
-      const p = getProtocol()
+      // Read from disk: OpenCode may load plugin in different contexts
+      // for tools vs hooks, causing separate in-memory Maps.
+      const diskState = readProtocolFromDisk()
+      const p = diskState || getProtocol()
       const state = {
         sessionId: currentSessionId,
         sessionStart: getTrace(sessionId()).session.startedAt,
@@ -158,6 +161,33 @@ function writeState(): void {
       // Best-effort: don't crash the plugin if disk is full
     }
   }, STATE_DEBOUNCE_MS)
+}
+
+
+// ---------------------------------------------------------------------------
+// Read protocol state from disk (write hook reads this, not in-memory Maps)
+// ---------------------------------------------------------------------------
+
+function readProtocolFromDisk(): ProtocolState | null {
+  try {
+    if (existsSync(STATE_FILE)) {
+      const raw = readFileSync(STATE_FILE, "utf8")
+      const s = JSON.parse(raw)
+      if (s && s.protocol) {
+        return {
+          ambiguityDone: s.protocol.ambiguityDone === true,
+          invariantsDone: s.protocol.invariantsDone === true,
+          gateDone: s.protocol.gateDone === true,
+          designDone: s.protocol.designDone === true,
+          commitDone: s.protocol.commitDone === true,
+          summaryDone: s.protocol.summaryDone === true,
+          writesBeforeGate: typeof s.protocol.writesBeforeGate === "number" ? s.protocol.writesBeforeGate : 0,
+          gateBlocked: s.protocol.gateBlocked === true,
+        }
+      }
+    }
+  } catch {}
+  return null
 }
 
 // ---------------------------------------------------------------------------
