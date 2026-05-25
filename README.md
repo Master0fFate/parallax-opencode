@@ -115,11 +115,15 @@ Parallax Agent (system prompt)
   |     parallax_trace_pr_comment   generate trace as PR-ready markdown
   |     parallax_trace_view         show full reasoning trace inline in chat
   |
-  +-- State files
-  |     .parallax/state.json        written on every transition (debounced)
-  |     .parallax/traces/           per-session JSON trace files
-  |     .parallax/scores.jsonl      append-only score history
-  |     .parallax/config.json       per-project config (optional)
+  +-- State files (at ~/.parallax/ in user home)
+  |     state.json                  written on every transition (immediate on checkins)
+  |     traces/                     per-session JSON trace files
+  |     scores.jsonl                append-only score history
+  |     config.json                 per-project config (optional)
+  |
+  |   Note: Plugin process cwd is the user home directory (~), so all
+  |   state persists at ~/.parallax/. The project .parallax/ dir is
+  |   used by the CLI only.
   |
   +-- CLI (parallax) -- 11 commands
         init | trace list/show/score/export/trend/report/compare/compliance
@@ -186,7 +190,7 @@ cd ~/.config/opencode && npm init -y && npm install @opencode-ai/plugin
 
 ## Project Status
 
-**v0.3.0** -- Trace Protocol + Protocol Intelligence + Analytics
+**v0.3.9** -- Cross-context protocol enforcement + full plugin integration
 
 | Phase | Status | What |
 |---|---|---|
@@ -237,7 +241,7 @@ parallax pre-commit              Git pre-commit hook wrapper
 ```
 parallax_plugin/
   agents/parallax.md            # Primary agent definition
-  src/plugin.ts                 # Canonical plugin (TypeScript, 900+ lines)
+  src/plugin.ts                 # Canonical plugin (TypeScript, 1000+ lines)
   src/types.ts                  # Shared type definitions
   src/detect.ts                 # Project detection
   src/trace.ts                  # Trace recording and export
