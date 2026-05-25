@@ -1,6 +1,6 @@
 {
   "name": "parallax-opencode",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "PARALLAX ENGINE plugin for OpenCode -- protocol enforcement, friction-loop verification, mode switching (plan/build/debug), trace recording, coherence scoring, CI gate, and PR-ready trace artifacts",
   "type": "module",
   "main": "./dist/plugin.js",
@@ -62,4 +62,3 @@
     "vitest": "^3.2.4"
   }
 }
-

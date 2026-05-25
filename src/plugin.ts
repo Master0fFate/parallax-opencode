@@ -754,6 +754,11 @@ export default {
       if (input.event.type === "session.created") {
         const props = input.event.properties || {}
         const info = (props.info || {}) as Record<string, unknown>
+        // Ignore child sessions (subagents, background tasks).
+        // They have a parentID and would overwrite the main session's protocol state.
+        if (info.parentID) return
+
+
         currentSessionId =
           (info.id as string) ||
           (props.sessionID as string) ||
