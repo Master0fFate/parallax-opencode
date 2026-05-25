@@ -1,34 +1,55 @@
-[![Parallax Banner](https://capsule-render.vercel.app/api?type=waving&height=200&color=6c63ff&desc=PARALLAX%20ENGINE&descAlignY=65&fontColor=ffffff&section=header&reversal=true&textBg=false&animation=fadeIn)](https://github.com/Master0fFate/parallax-opencode)
-
 # PARALLAX ENGINE
 
-**The first AI coding assistant that shows its work.**
+**OpenCode plugin** -- friction-loop verification, protocol enforcement, mode switching (plan/build/debug), and structured reasoning traces.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![OpenCode](https://img.shields.io/badge/OpenCode-plugin-6c63ff)](https://opencode.ai)
 [![npm](https://img.shields.io/npm/v/parallax-opencode)](https://www.npmjs.com/package/parallax-opencode)
 [![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)]()
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)]()
 
 ---
 
-## Quick Install
+## Install
 
 ```bash
 npx parallax-opencode
 ```
 
-After install, restart OpenCode and press **Tab** to cycle to the Parallax agent.
+Restart OpenCode. The plugin hooks and tools are auto-loaded.
+
+The plugin stores runtime state at `~/.parallax/state.json` (plugin process runs from user home directory).
 
 ---
 
-## What Makes Parallax Different
+## What It Does
 
-Every AI coding tool gives you code. None of them show you **how they got there**.
+### Protocol Enforcement (6 steps)
 
-Parallax captures the complete reasoning trace of every session -- the ambiguity assessment, the invariants analysis, every verification result, every decision -- and makes it visible, exportable, and replayable.
+The Parallax agent follows a structured reasoning protocol before writing code. The plugin enforces this via the `tool.execute.before` hook:
 
-> "Here is my complete reasoning trace. Review it. Score it. Compare it. See for yourself."
+| Step | Checkin | What it blocks |
+|---|---|---|
+| 1. Ambiguity Check | `parallax_checkin("ambiguity")` | All writes until done |
+| 2. 4 Invariants | `parallax_checkin("invariants")` | Warns after 3 writes without checkin |
+| 3. Verification Gate | `parallax_checkin("gate")` | Requires invariants first |
+| 4. Design Doc (opt-in) | `parallax_checkin("design")` | Per project via config |
+| 5. Commit Decision | `parallax_checkin("commit")` | Any time after gate |
+| 6. Summary | `parallax_checkin("summary")` | Generates retrospective |
+
+### Mode Switching
+
+| Mode | Tool | When |
+|---|---|---|
+| PLAN | `parallax_plan` | Vague requirements, before writing code |
+| BUILD | `parallax_build` | Executing, writing code (default) |
+| DEBUG | `parallax_debug` | Post-build quality and security audit |
+
+### Friction Loop
+
+After every write, the plugin auto-runs project verification. On failure, it decrements a retry counter. After 3 consecutive failures, it blocks further writes until the issue is resolved.
+
+### Trace Recording
+
+Every session produces a structured reasoning trace -- phases, writes, verification results. The AI can export it to JSON or generate a PR-ready markdown summary.
 
 ### The 4 Invariants
 
@@ -41,55 +62,34 @@ Parallax captures the complete reasoning trace of every session -- the ambiguity
 
 Based on [@acidgreenservers AGENTS.md](https://gist.github.com/acidgreenservers/001185d63e5cd65f9fbe6f7a1c70a200)
 
-### The Coherence Score
+---
 
-After every session, Parallax computes an evidence-based quality score (0-100):
+## Plugin Tools
 
-- **Protocol Coverage (30%)** -- Were all 6 protocol phases completed?
-- **Verification Integrity (35%)** -- Pass rate on first attempt?
-- **Edge Case Coverage (20%)** -- How many edge categories were analyzed?
-- **Timing Discipline (15%)** -- Were phases in correct order?
+These are called by the AI in OpenCode chat:
 
-Track scores over time:
-
-```bash
-parallax trace trend
-parallax trace report --week
-```
-
-### Trace in Your PR
-
-The AI calls `parallax_trace_pr_comment` at session end and outputs a formatted markdown block directly in the chat. Copy it into your PR. No terminal needed.
-
-### CI/CD Gate
-
-```yaml
-- name: Parallax Gate
-  run: parallax gate --min-score 70
-```
-
-Pre-commit hook:
-```bash
-echo 'parallax pre-commit' >> .git/hooks/pre-commit
-```
+| Tool | Purpose |
+|---|---|
+| `parallax_verify` | Run project verification |
+| `parallax_analyze` | Multi-perspective analysis on a topic |
+| `parallax_checkin` | Mark a protocol step complete |
+| `parallax_plan` / `_build` / `_debug` | Switch modes |
+| `parallax_trace_export` | Export session trace to JSON |
+| `parallax_trace_pr_comment` | Generate trace as PR-ready markdown |
+| `parallax_trace_view` | Show full reasoning trace inline |
 
 ---
 
-## Comparison
+## CLI (CI Only)
 
-| Feature | Plain OpenCode | Cursor | Copilot | Parallax |
-|---|---|---|---|---|
-| Structured reasoning trace | No | No | No | **Yes** |
-| Trace as PR comment (inline) | No | No | No | **Yes** |
-| Evidence-based quality score | No | No | No | **Yes** |
-| Protocol enforcement (6 steps) | No | No | No | **Yes** |
-| Mode switching (plan/build/debug) | No | No | No | **Yes** |
-| CI coherence gate | No | No | No | **Yes** |
-| Session retrospective | No | No | No | **Yes** |
-| Design doc enforcement | No | No | No | **Yes** |
-| Multi-agent state sharing | No | No | No | **Yes** |
-| Shell env injection | No | No | No | **Yes** |
-| Trace analytics | No | No | No | **Yes** |
+The `parallax` CLI is for CI pipelines and automation, not for interactive use:
+
+```bash
+parallax gate --min-score 70       # CI coherence gate (exit code 0/1)
+parallax pre-commit                # Git pre-commit hook wrapper
+parallax init                      # Create .parallax/ config dir
+npx parallax-opencode              # Install the plugin (alias for init)
+```
 
 ---
 
@@ -107,57 +107,27 @@ Parallax Agent (system prompt)
   |     shell.env                   --> PARALLAX_MODE, PARALLAX_SESSION_ID in shell
   |
   +-- Custom tools (9)
-  |     parallax_verify             auto-verify after writes
-  |     parallax_analyze            multi-perspective analysis
-  |     parallax_checkin            protocol step checkin (6 steps incl. design)
-  |     parallax_plan / _build / _debug   mode switching
-  |     parallax_trace_export       export session trace to JSON file
-  |     parallax_trace_pr_comment   generate trace as PR-ready markdown
-  |     parallax_trace_view         show full reasoning trace inline in chat
+  |     parallax_verify, parallax_analyze, parallax_checkin,
+  |     parallax_plan / _build / _debug,
+  |     parallax_trace_export / _pr_comment / _view
   |
-  +-- State files (at ~/.parallax/ in user home)
-  |     state.json                  written on every transition (immediate on checkins)
-  |     traces/                     per-session JSON trace files
+  +-- State (at ~/.parallax/)
+  |     state.json                  protocol state (immediate on checkins)
+  |     traces/                     per-session JSON traces
   |     scores.jsonl                append-only score history
   |     config.json                 per-project config (optional)
-  |
-  |   Note: Plugin process cwd is the user home directory (~), so all
-  |   state persists at ~/.parallax/. The project .parallax/ dir is
-  |   used by the CLI only.
-  |
-  +-- CLI (parallax) -- 11 commands
-        init | trace list/show/score/export/trend/report/compare/compliance
-        gate --min-score <n> | pre-commit
 ```
-
-### Three Modes
-
-| Mode | Tool | When |
-|---|---|---|
-| **PLAN** | `parallax_plan` | Vague requirements, before writing code |
-| **BUILD** | `parallax_build` | Executing, writing code (default) |
-| **DEBUG** | `parallax_debug` | Post-build quality and security audit |
-
-### Six Protocol Steps
-
-| Step | Checkin | Enforced |
-|---|---|---|
-| 1. Ambiguity Check | `parallax_checkin("ambiguity")` | Blocks all writes until done |
-| 2. 4 Invariants | `parallax_checkin("invariants")` | Warns after 3 writes without checkin |
-| 3. Verification Gate | `parallax_checkin("gate")` | Requires invariants first |
-| 4. Design Doc *(opt-in)* | `parallax_checkin("design")` | Per project via config |
-| 5. Commit Decision | `parallax_checkin("commit")` | Any time after gate |
-| 6. Summary | `parallax_checkin("summary")` | Generates retrospective |
 
 ---
 
-## Project Config (.parallax/config.json)
+## Project Config
+
+Create `.parallax/config.json` in your project root:
 
 ```json
 {
   "strictness": "standard",
   "minScore": 70,
-  "adaptiveProtocol": false,
   "designDocRequired": false,
   "trivialPatterns": ["*.md", "*.json"],
   "highRiskPatterns": ["**/auth/**", "**/*.env*"]
@@ -168,93 +138,26 @@ Parallax Agent (system prompt)
 |---|---|---|
 | `strictness` | `"standard"` | `"strict"` / `"standard"` / `"relaxed"` |
 | `minScore` | `70` | Gate threshold for CI |
-| `adaptiveProtocol` | `false` | Auto-skip gate steps for trivial changes |
 | `designDocRequired` | `false` | Block writes until design doc produced |
 | `trivialPatterns` | `[]` | File patterns considered low-risk |
 | `highRiskPatterns` | `[]` | Patterns always requiring full protocol |
 
 ---
 
-## Manual Install
-
-```bash
-cp dist-standalone/parallax-engine.js ~/.config/opencode/plugins/
-cp agents/parallax.md ~/.config/opencode/agents/
-cp -r skills/parallax       ~/.config/opencode/skills/
-cp -r skills/parallax-plan  ~/.config/opencode/skills/
-cp -r skills/parallax-debug ~/.config/opencode/skills/
-cd ~/.config/opencode && npm init -y && npm install @opencode-ai/plugin
-```
-
----
-
-## Project Status
-
-**v0.3.9** -- Cross-context protocol enforcement + full plugin integration
-
-| Phase | Status | What |
-|---|---|---|
-| 1: Trace Artifact | Complete | PR comments, inline viewer, CI gate, pre-commit |
-| 2: Protocol Intelligence | Complete | State persistence, retrospective, multi-agent sharing, shell env, design doc |
-| 3: Developer Experience | Partial | Config system, design doc gate. Adaptive protocol deferred |
-| 4: TUI Integration | Planned | Sidebar protocol status widget |
-| 5: Analytics | Complete | Weekly reports, trace comparison, compliance reports |
-
-See [ROADMAP.md](ROADMAP.md) for the full strategic plan.
-
----
-
-## Commands
-
-### Plugin Tools (AI calls in OpenCode chat)
-
-```
-parallax_verify                 Run project verification
-parallax_analyze {topic}        Multi-perspective analysis
-parallax_checkin {step}         Protocol step (ambiguity/invariants/gate/design/commit/summary)
-parallax_plan / _build / _debug Mode switching
-parallax_trace_export           Export session trace to JSON
-parallax_trace_pr_comment       Generate trace as PR-ready markdown
-parallax_trace_view             Show reasoning trace inline in chat
-```
-
-### CLI (for CI and analytics)
-
-```
-parallax init                    Create .parallax/ directory
-parallax trace list              List all traces
-parallax trace show <id>         Show trace details
-parallax trace score <id>        Show coherence score breakdown
-parallax trace export <id>       Export trace as pretty JSON
-parallax trace trend             Show score trend over time
-parallax trace report --week     Weekly analytics report
-parallax trace compare <a> <b>   Side-by-side trace comparison
-parallax trace compliance <id>   Protocol compliance report
-parallax gate --min-score <n>    CI coherence gate
-parallax pre-commit              Git pre-commit hook wrapper
-```
-
----
-
-## Files
+## Source Layout
 
 ```
 parallax_plugin/
-  agents/parallax.md            # Primary agent definition
-  src/plugin.ts                 # Canonical plugin (TypeScript, 1000+ lines)
-  src/types.ts                  # Shared type definitions
+  agents/parallax.md            # Agent definition
+  src/plugin.ts                 # Plugin (~1000 lines)
+  src/types.ts                  # Shared types
   src/detect.ts                 # Project detection
-  src/trace.ts                  # Trace recording and export
+  src/trace.ts                  # Trace recording + export
   src/score.ts                  # Coherence score + analytics
-  src/cli.ts                    # CLI entry point (11 commands)
+  src/cli.ts                    # CLI (CI only)
   src/tests/                    # 30 tests across 5 files
-  dist/                         # Compiled output
-  dist-standalone/              # Standalone bundled plugin (34KB)
-  skills/                       # Protocol skills
-  scripts/                      # Install and publish scripts
-  .parallax/                    # Runtime state + traces + scores
-  ROADMAP.md                    # Strategic roadmap
-  CHANGELOG.md                  # Version history
+  dist-standalone/              # Bundled plugin (~37KB)
+  skills/                       # Parallax protocol skills
 ```
 
 ---

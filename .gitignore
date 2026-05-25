@@ -23,13 +23,8 @@ Thumbs.db
 *.swp
 *.swo
 
-# Parallax runtime state (changes every session)
-.parallax/state.json
-
-# Parallax local traces (keep dir, ignore contents)
-.parallax/traces/*.json
-!.parallax/traces/.gitkeep
-
+# Parallax runtime (auto-generated, do not commit)
+.parallax/
 # MCP / runtime databases
 data/*.db
 data/*.sqlite
