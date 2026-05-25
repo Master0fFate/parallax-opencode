@@ -124,7 +124,41 @@ function loadConfig(): ParallaxConfig {
 
 let stateDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
-function writeState(): void {
+function flushState(): void {
+  try {
+    const s = getFriction()
+    const m = getMode()
+    const p = getProtocol()
+    const state = {
+      sessionId: currentSessionId,
+      sessionStart: getTrace(sessionId()).session.startedAt,
+      mode: m.mode,
+      friction: {
+        successes: s.successes,
+        trials: s.trials,
+        retriesLeft: s.retriesLeft,
+        lastObservation: s.lastObservation,
+      },
+      protocol: {
+        ambiguityDone: p.ambiguityDone,
+        invariantsDone: p.invariantsDone,
+        gateDone: p.gateDone,
+        designDone: p.designDone,
+        commitDone: p.commitDone,
+        summaryDone: p.summaryDone,
+        writesBeforeGate: p.writesBeforeGate,
+        gateBlocked: p.gateBlocked,
+      },
+    }
+    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8")
+  } catch {}
+}
+
+function writeState(immediate = false): void {
+  if (immediate) {
+    flushState()
+    return
+  }
   if (stateDebounceTimer) clearTimeout(stateDebounceTimer)
   stateDebounceTimer = setTimeout(() => {
     stateDebounceTimer = null
@@ -345,7 +379,7 @@ export default {
           if (step === "ambiguity" && !p.ambiguityDone) {
             p.ambiguityDone = true
             addPhase(sid, "ambiguity_check")
-            writeState()
+            writeState(true)
             return "[parallax] Step 1/6: Ambiguity Check marked complete."
           }
           if (step === "invariants") {
@@ -354,7 +388,7 @@ export default {
             }
             p.invariantsDone = true
             addPhase(sid, "four_invariants")
-            writeState()
+            writeState(true)
             return "[parallax] Step 2/6: 4 Invariants marked complete."
           }
           if (step === "gate") {
@@ -363,7 +397,7 @@ export default {
             }
             p.gateDone = true
             addPhase(sid, "verification_gate")
-            writeState()
+            writeState(true)
             return "[parallax] Step 3/6: Verification Gate marked complete."
           }
           if (step === "design") {
@@ -372,19 +406,19 @@ export default {
             }
             p.designDone = true
             addPhase(sid, "design_check")
-            writeState()
+            writeState(true)
             return "[parallax] Step 4/6: Design Doc marked complete."
           }
           if (step === "commit") {
             p.commitDone = true
             addPhase(sid, "commit_decision")
-            writeState()
+            writeState(true)
             return "[parallax] Step 5/6: Commit Decision marked complete."
           }
           if (step === "summary") {
             p.summaryDone = true
             addPhase(sid, "summary")
-            writeState()
+            writeState(true)
 
             // Phase 2.3: Post-session retrospective
             const trace = getTrace(sid)
