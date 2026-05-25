@@ -129,9 +129,10 @@ function flushState(): void {
     const s = getFriction()
     const m = getMode()
     const p = getProtocol()
+    const trace = getTrace(sessionId())
     const state = {
-      sessionId: currentSessionId,
-      sessionStart: getTrace(sessionId()).session.startedAt,
+      sessionId: "current",
+      sessionStart: trace.session.startedAt,
       mode: m.mode,
       friction: {
         successes: s.successes,
@@ -150,8 +151,11 @@ function flushState(): void {
         gateBlocked: p.gateBlocked,
       },
     }
-    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8")
-  } catch {}
+    // Debug: write BEFORE state file to isolate error
+    const json = JSON.stringify(state, null, 2)
+    writeFileSync(STATE_FILE, json, "utf8")
+  } catch {
+  }
 }
 
 function writeState(immediate = false): void {
@@ -170,7 +174,7 @@ function writeState(immediate = false): void {
       const diskState = readProtocolFromDisk()
       const p = diskState || getProtocol()
       const state = {
-        sessionId: currentSessionId,
+        sessionId: "current",
         sessionStart: getTrace(sessionId()).session.startedAt,
         mode: m.mode,
         friction: {
@@ -698,7 +702,9 @@ export default {
     "tool.execute.before": async (input: { tool: string }) => {
       if (!["write", "edit", "apply_patch"].includes(input.tool)) return
 
-      const p = getProtocol()
+      // Read from disk: OpenCode loads plugin in separate execution contexts
+      // for tools vs hooks. In-memory Maps are NOT shared across contexts.
+      const p = readProtocolFromDisk() || getProtocol()
       const cfg = loadConfig()
 
       // Enforce ambiguity check before any write
