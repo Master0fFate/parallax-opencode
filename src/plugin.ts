@@ -53,13 +53,13 @@ const protocolStore = new Map<string, ProtocolState>()
 let currentSessionId: string | null = null
 let currentAgentName: string | null = null
 
-let stableSessionKey: string | null = null
+// Protocol state uses a fixed key that never changes within a plugin load.
+// OpenCode creates multiple internal sessions (root, child, subagent) during
+// a single conversation. The protocol state must survive all of them.
+const PROTOCOL_KEY = "current"
 
 function sessionId(): string {
-  // Protocol state is keyed by a stable identifier, not OpenCode session ID.
-  // OpenCode creates multiple sessions per conversation (root, child, subagent).
-  // The first root session ID is locked in and never changes.
-  return stableSessionKey || "default"
+  return PROTOCOL_KEY
 }
 
 function getFriction(s: string = sessionId()): FrictionState {
@@ -759,21 +759,15 @@ export default {
       if (input.event.type === "session.created") {
         const props = input.event.properties || {}
         const info = (props.info || {}) as Record<string, unknown>
-        // Ignore child sessions (subagents, background tasks).
-        // They have a parentID and would overwrite the main session's protocol state.
+        // Child sessions have a parentID. Only track the root session
+        // for trace recording. Protocol state uses a fixed key and is unaffected.
         if (info.parentID) return
 
-        // Lock in the first root session ID. Subsequent root session.created
-        // events must not change the key because protocol state is already
-        // attached to the first key via stableSessionKey.
-        if (stableSessionKey) return
-
-
-        stableSessionKey ??= (currentSessionId =
+        currentSessionId =
           (info.id as string) ||
           (props.sessionID as string) ||
           (info.sessionID as string) ||
-          null)
+          null
 
         // Agent name lives in Session.agent (v2 SDK types.gen.d.ts:590)
         currentAgentName =
