@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdirSync, copyFileSync, cpSync, existsSync, readFileSync, writeFileSync } from "fs"
+import { mkdirSync, copyFileSync, cpSync, existsSync, readFileSync, writeFileSync, rmSync } from "fs"
 import { homedir, platform } from "os"
 import { join, dirname } from "path"
 import { fileURLToPath } from "url"
@@ -15,19 +15,7 @@ const CONFIG = (() => {
   return base
 })()
 
-const PLUGIN_SRC_CANDIDATES = [
-  join(ROOT, "dist-standalone", "parallax-engine.js"),
-  join(ROOT, "dist", "plugin.js"),
-  join(ROOT, "src", "plugin.ts"),
-]
-function resolvePluginSrc() {
-  for (const candidate of PLUGIN_SRC_CANDIDATES) {
-    if (existsSync(candidate)) return candidate
-  }
-  return PLUGIN_SRC_CANDIDATES[0] // fall through to first even if missing
-}
 const FILES = {
-  plugin: { src: resolvePluginSrc(), dest: join(CONFIG, "plugins", "parallax-engine.js") },
   agents: [
     { src: join(ROOT, "agents", "parallax.md"), dest: join(CONFIG, "agents", "parallax.md") },
     { src: join(ROOT, "agents", "horizon.md"),  dest: join(CONFIG, "agents", "horizon.md") },
@@ -70,8 +58,14 @@ function copyFiles() {
   ensureDir(join(CONFIG, "agents"))
   ensureDir(join(CONFIG, "skills"))
 
-  log(`copying plugin  -> ${FILES.plugin.dest}`)
-  copyFileSync(FILES.plugin.src, FILES.plugin.dest)
+  // Remove old standalone plugin file (now loaded from node_modules)
+  const oldPluginPath = join(CONFIG, "plugins", "parallax-engine.js")
+  if (existsSync(oldPluginPath)) {
+    log(`removing old standalone plugin -> ${oldPluginPath}`)
+    rmSync(oldPluginPath)
+  }
+  const oldDtsPath = join(CONFIG, "plugins", "parallax-engine.d.ts")
+  if (existsSync(oldDtsPath)) rmSync(oldDtsPath)
 
   for (const ag of FILES.agents) {
     log(`copying agent   -> ${ag.dest}`)
@@ -91,6 +85,7 @@ function copyFiles() {
 function registerPlugin() {
   const configPath = join(CONFIG, "opencode.json")
   const pluginEntry = "parallax-opencode"
+  const oldEntries = ["./plugins/parallax-engine.js", "parallax-engine"]
 
   if (!existsSync(configPath)) {
     log("no opencode.json found -- skipping registration")
@@ -105,19 +100,21 @@ function registerPlugin() {
       config.plugin = []
     }
 
-    // Check if already registered (by name, old path, or old name)
-    const alreadyRegistered = config.plugin.some(
-      (p) => p === pluginEntry || p === "parallax-engine" || p === "./plugins/parallax-engine.js",
-    )
+    // Remove old deprecated entries
+    const hadOld = config.plugin.some((p) => oldEntries.includes(p))
+    config.plugin = config.plugin.filter((p) => !oldEntries.includes(p))
 
-    if (alreadyRegistered) {
+    // Add new entry if not present
+    if (!config.plugin.includes(pluginEntry)) {
+      config.plugin.push(pluginEntry)
+      writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf8")
+      log("registered parallax-opencode plugin in opencode.json")
+    } else if (hadOld) {
+      writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf8")
+      log("migrated old plugin entry to parallax-opencode")
+    } else {
       log("plugin already registered in opencode.json")
-      return
     }
-
-    config.plugin.push(pluginEntry)
-    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf8")
-    log("registered parallax-opencode plugin in opencode.json")
   } catch (err) {
     log(`failed to register plugin: ${String(err && err.message ? err.message : err)}`)
   }
