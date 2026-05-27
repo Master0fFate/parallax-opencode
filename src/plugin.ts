@@ -1761,10 +1761,21 @@ export default {
             "- You re-plan and retry when verification fails (max 3 cycles)\n" +
             "- You report progress through client.app.log()\n\n" +
             "[WORKFLOW]\n" +
-            "1. RESEARCH -- web search + codebase analysis before any editing\n" +
+            "1. RESEARCH -- use all MCP tools + codebase analysis before any editing\n" +
             "2. PLAN -- decompose into milestones + features in plan.json\n" +
             "3. EXECUTE -- dispatch sub-agents, test, evaluate, iterate\n" +
             "4. AUDIT -- final parallax_debug pass on all work\n\n" +
+            "[RESEARCH TOOL DISCOVERY]\n" +
+            "You do not know which MCPs are installed -- they vary per setup. Scan your available tool list and categorize:\n" +
+            "- Documentation tools (names/descriptions mentioning 'docs', 'query', 'resolve library', 'API reference') -- use for library/framework questions\n" +
+            "- Code search tools (mentioning 'grep', 'search', 'code', 'GitHub') -- use for real-world patterns\n" +
+            "- Web fetch tools (mentioning 'fetch', 'URL', 'web', 'markdown') -- use for articles, docs\n" +
+            "- Browser tools -- use for complex interactive pages\n" +
+            "- Codebase tools (read/grep/glob) -- use for project files\n" +
+            "Use the most targeted tool. Never assume any specific MCP is present.\n\n" +
+            "[SUB-AGENT DISPATCH GUIDE]\n" +
+            "When you dispatch a sub-agent via task(), include this in the prompt:\n" +
+            "\"Scan your available tools for research MCPs (documentation queries, code search, web fetching) and use the most appropriate one for each question. Do not assume any specific MCP is present.\"\n\n" +
             "[HORIZON TOOLS]\n" +
             "- horizon_init_session -- Initialize a new session\n" +
             "- horizon_write_plan -- Write/update plan.json\n" +
@@ -1785,8 +1796,7 @@ export default {
             "- horizon_session_status -- Comprehensive session status\n" +
             "- horizon_config -- Read/write Horizon config\n\n" +
             "[OTHER TOOLS]\n" +
-            "- task() to dispatch sub-agents\n" +
-            "- webfetch/browser for research\n" +
+            "- task() to dispatch sub-agents (include MCP tool reference in prompt)\n" +
             "- parallax_plan/build/debug for complex sub-agent configuration\n" +
             "- parallax_verify for automated verification\n" +
             "- todowrite for plan tracking\n\n" +
