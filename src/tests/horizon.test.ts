@@ -1,0 +1,477 @@
+/**
+ * Tests for Horizon agent persistence module.
+ *
+ * Tests session initialization, plan/state/decision read/write,
+ * feature updates with stat recalculation, milestone updates,
+ * skill management, trace archiving, and session listing.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest"
+
+// In-memory mock filesystem
+const mockFs: { exists: Record<string, boolean>; files: Record<string, string> } = {
+  exists: {},
+  files: {},
+}
+vi.mock("fs", () => {
+  // Normalize path separators for in-memory lookup consistency
+  const norm = (p: string) => p.replace(/\\/g, "/")
+
+  return {
+    existsSync: vi.fn((p: string) => mockFs.exists[norm(p)] === true),
+    mkdirSync: vi.fn((p: string, opts?: any) => {
+      const key = norm(p)
+      mockFs.exists[key] = true
+      // Simulate { recursive: true } by creating all parent directories
+      if (opts?.recursive) {
+        const parts = key.split("/")
+        for (let i = 1; i < parts.length; i++) {
+          const parent = parts.slice(0, i).join("/")
+          if (parent) mockFs.exists[parent] = true
+        }
+      }
+    }),
+    writeFileSync: vi.fn((p: string, data: string) => {
+      const key = norm(p)
+      mockFs.files[key] = data
+      mockFs.exists[key] = true
+    }),
+    readFileSync: vi.fn((p: string) => {
+      const key = norm(p)
+      if (mockFs.files[key] !== undefined) return mockFs.files[key]
+      throw new Error(`File not found: ${key}`)
+    }),
+    readdirSync: vi.fn((p: string) => {
+      const dir = norm(p)
+      const prefix = dir.endsWith("/") ? dir : dir + "/"
+      return Object.keys(mockFs.exists)
+        .filter((k) => k.startsWith(prefix) && k !== prefix)
+        .map((k) => k.slice(prefix.length).split("/")[0])
+        .filter((v, i, a) => a.indexOf(v) === i)
+    }),
+    appendFileSync: vi.fn((p: string, data: string) => {
+      const key = norm(p)
+      mockFs.files[key] = (mockFs.files[key] || "") + data
+      mockFs.exists[key] = true
+    }),
+  }
+})
+
+vi.mock("os", () => ({
+  homedir: () => "/mock-home",
+}))
+
+import * as horizon from "../horizon"
+import type {
+  HorizonPlan,
+  HorizonFeature,
+  HorizonMilestone,
+  HorizonState,
+  HorizonDecision,
+} from "../types"
+
+beforeEach(() => {
+  mockFs.exists = {}
+  mockFs.files = {}
+})
+
+function makeSamplePlan(sessionId: string): HorizonPlan {
+  return {
+    schemaVersion: "1.0",
+    sessionId,
+    goal: "Test goal",
+    autonomyLevel: "full",
+    status: "executing",
+    createdAt: "2026-01-01T00:00:00Z",
+    completedAt: null,
+    milestones: [
+      {
+        id: "m1",
+        name: "Milestone One",
+        description: "First milestone",
+        status: "in_progress",
+        order: 1,
+        requiresApproval: false,
+        features: [
+          {
+            id: "f1",
+            name: "Feature One",
+            description: "First feature",
+            acceptanceCriteria: "It works",
+            protocolLevel: "none",
+            status: "in_progress",
+            order: 1,
+            subAgentSessionId: null,
+            attempts: 1,
+            maxAttempts: 3,
+            verification: { passed: false, testResults: null, issues: [], score: null },
+            skillsRequired: [],
+            skillsGenerated: [],
+          },
+          {
+            id: "f2",
+            name: "Feature Two",
+            description: "Second feature",
+            acceptanceCriteria: "It also works",
+            protocolLevel: "none",
+            status: "pending",
+            order: 2,
+            subAgentSessionId: null,
+            attempts: 0,
+            maxAttempts: 3,
+            verification: { passed: false, testResults: null, issues: [], score: null },
+            skillsRequired: [],
+            skillsGenerated: [],
+          },
+        ],
+      },
+    ],
+    skills: { global: [], sessionScoped: [] },
+    stats: { totalFeatures: 2, completedFeatures: 0, failedFeatures: 0, totalRetries: 1, estimatedCost: null },
+  }
+}
+
+describe("Horizon Config", () => {
+  it("loads default config when no file exists", () => {
+    const config = horizon.loadHorizonConfig()
+    expect(config.autonomyLevel).toBe("full")
+    expect(config.maxRetryCycles).toBe(3)
+    expect(config.testCommand).toBe("npm test")
+  })
+
+  it("saves and loads config", () => {
+    horizon.saveHorizonConfig({
+      autonomyLevel: "semi",
+      autoApproveMilestones: false,
+      maxRetryCycles: 5,
+      decisionConfidenceThreshold: 0.8,
+      pauseOnCriticalFailure: true,
+      testCommand: "pnpm test",
+      lintCommand: "pnpm lint",
+    })
+    const config = horizon.loadHorizonConfig()
+    expect(config.autonomyLevel).toBe("semi")
+    expect(config.maxRetryCycles).toBe(5)
+    expect(config.testCommand).toBe("pnpm test")
+  })
+})
+
+describe("Horizon Session Init", () => {
+  it("creates full directory tree", () => {
+    horizon.initHorizonSession("test-session", "Test goal", "full")
+
+    // Verify plan.json exists
+    const plan = horizon.readHorizonPlan("test-session")
+    expect(plan).not.toBeNull()
+    expect(plan!.goal).toBe("Test goal")
+    expect(plan!.autonomyLevel).toBe("full")
+    expect(plan!.status).toBe("planning")
+    expect(plan!.milestones).toEqual([])
+
+    // Verify state.json exists
+    const state = horizon.readHorizonState("test-session")
+    expect(state).not.toBeNull()
+    expect(state!.currentPhase).toBe("research")
+    expect(state!.pausedAt).toBeNull()
+
+    // Verify index.json was updated
+    const sessions = horizon.listHorizonSessions()
+    expect(sessions.length).toBe(1)
+    expect(sessions[0].id).toBe("test-session")
+    expect(sessions[0].meta.status).toBe("planning")
+  })
+
+  it("rejects invalid autonomy levels gracefully (type-enforced)", () => {
+    // TypeScript enforces this at compile time, but ensure runtime doesn't crash
+    horizon.initHorizonSession("test-session-2", "Test", "full")
+    const plan = horizon.readHorizonPlan("test-session-2")
+    expect(plan).not.toBeNull()
+  })
+})
+
+describe("Horizon Plan Read/Write", () => {
+  it("writes and reads a plan", () => {
+    const plan = makeSamplePlan("test-session")
+    horizon.writeHorizonPlan("test-session", plan)
+
+    const read = horizon.readHorizonPlan("test-session")
+    expect(read).not.toBeNull()
+    expect(read!.goal).toBe("Test goal")
+    expect(read!.milestones.length).toBe(1)
+    expect(read!.milestones[0].features.length).toBe(2)
+    expect(read!.stats.totalFeatures).toBe(2)
+  })
+
+  it("returns null for missing plan", () => {
+    const plan = horizon.readHorizonPlan("nonexistent")
+    expect(plan).toBeNull()
+  })
+
+  it("updates index status on write", () => {
+    horizon.initHorizonSession("test-session", "Test", "full")
+    const plan = makeSamplePlan("test-session")
+    plan.status = "completed"
+    horizon.writeHorizonPlan("test-session", plan)
+
+    const sessions = horizon.listHorizonSessions()
+    const s = sessions.find((s) => s.id === "test-session")
+    expect(s).not.toBeUndefined()
+    expect(s!.meta.status).toBe("completed")
+  })
+})
+
+describe("Horizon Feature Updates", () => {
+  it("updates feature status and recalculates stats", () => {
+    const plan = makeSamplePlan("test-session")
+    horizon.writeHorizonPlan("test-session", plan)
+
+    // Mark f1 as completed
+    const result = horizon.updateHorizonFeature("test-session", "f1", {
+      status: "completed",
+      verification: { passed: true, testResults: null, issues: [], score: 100 },
+    } as any)
+
+    expect(result).not.toBeNull()
+    expect(result!.stats.completedFeatures).toBe(1)
+    expect(result!.stats.totalFeatures).toBe(2)
+
+    // Verify the feature was updated
+    const read = horizon.readHorizonPlan("test-session")
+    const f1 = read!.milestones[0].features.find((f) => f.id === "f1")
+    expect(f1!.status).toBe("completed")
+    expect(f1!.verification.passed).toBe(true)
+    expect(f1!.verification.score).toBe(100)
+  })
+
+  it("increments attempts when setting to in_progress", () => {
+    const plan = makeSamplePlan("test-session")
+    horizon.writeHorizonPlan("test-session", plan)
+
+    horizon.updateHorizonFeature("test-session", "f2", { status: "in_progress" } as any)
+
+    const read = horizon.readHorizonPlan("test-session")
+    const f2 = read!.milestones[0].features.find((f) => f.id === "f2")
+    expect(f2!.attempts).toBe(1)
+    expect(f2!.status).toBe("in_progress")
+  })
+
+  it("returns null for nonexistent feature", () => {
+    const plan = makeSamplePlan("test-session")
+    horizon.writeHorizonPlan("test-session", plan)
+
+    const result = horizon.updateHorizonFeature("test-session", "nonexistent", { status: "completed" } as any)
+    expect(result).toBeNull()
+  })
+})
+
+describe("Horizon Milestone Updates", () => {
+  it("updates milestone status", () => {
+    const plan = makeSamplePlan("test-session")
+    horizon.writeHorizonPlan("test-session", plan)
+
+    const result = horizon.updateHorizonMilestone("test-session", "m1", "completed")
+    expect(result).not.toBeNull()
+    expect(result!.milestones[0].status).toBe("completed")
+  })
+
+  it("returns null for nonexistent milestone", () => {
+    const plan = makeSamplePlan("test-session")
+    horizon.writeHorizonPlan("test-session", plan)
+
+    const result = horizon.updateHorizonMilestone("test-session", "nonexistent", "completed")
+    expect(result).toBeNull()
+  })
+})
+
+describe("Horizon State Read/Write", () => {
+  it("writes and reads state", () => {
+    const state: HorizonState = {
+      sessionId: "test-session",
+      currentPhase: "execute",
+      activeSubAgents: ["agent-1"],
+      currentMilestoneId: "m1",
+      currentFeatureId: "f1",
+      lastCheckpoint: null,
+      pausedAt: null,
+      pauseReason: null,
+    }
+    horizon.writeHorizonState("test-session", state)
+
+    const read = horizon.readHorizonState("test-session")
+    expect(read).not.toBeNull()
+    expect(read!.currentPhase).toBe("execute")
+    expect(read!.activeSubAgents).toEqual(["agent-1"])
+    expect(read!.currentMilestoneId).toBe("m1")
+  })
+
+  it("sets lastCheckpoint on write", () => {
+    const state: HorizonState = {
+      sessionId: "test-session",
+      currentPhase: "research",
+      activeSubAgents: [],
+      currentMilestoneId: null,
+      currentFeatureId: null,
+      lastCheckpoint: null,
+      pausedAt: null,
+      pauseReason: null,
+    }
+    horizon.writeHorizonState("test-session", state)
+
+    const read = horizon.readHorizonState("test-session")
+    expect(read!.lastCheckpoint).not.toBeNull()
+    // Should be an ISO timestamp
+    expect(new Date(read!.lastCheckpoint!).toISOString()).toBe(read!.lastCheckpoint)
+  })
+
+  it("returns null for missing state", () => {
+    const state = horizon.readHorizonState("nonexistent")
+    expect(state).toBeNull()
+  })
+})
+
+describe("Horizon Decision Log", () => {
+  it("appends and reads decisions", () => {
+    const decision: HorizonDecision = {
+      timestamp: "2026-01-01T00:00:00Z",
+      feature: "f1",
+      ambiguity: "Which library?",
+      researchResult: "Library X is standard",
+      decision: "Use Library X",
+      rationale: "Industry standard",
+      confidence: "high",
+    }
+    horizon.appendHorizonDecision("test-session", decision)
+
+    const decisions = horizon.readHorizonDecisions("test-session")
+    expect(decisions.length).toBe(1)
+    expect(decisions[0].feature).toBe("f1")
+    expect(decisions[0].confidence).toBe("high")
+  })
+
+  it("appends multiple decisions in order", () => {
+    horizon.appendHorizonDecision("test-session", {
+      timestamp: "2026-01-01T00:00:00Z",
+      feature: "f1",
+      ambiguity: "Q1",
+      researchResult: "R1",
+      decision: "D1",
+      rationale: "R1",
+      confidence: "high",
+    })
+    horizon.appendHorizonDecision("test-session", {
+      timestamp: "2026-01-02T00:00:00Z",
+      feature: "f2",
+      ambiguity: "Q2",
+      researchResult: "R2",
+      decision: "D2",
+      rationale: "R2",
+      confidence: "medium",
+    })
+
+    const decisions = horizon.readHorizonDecisions("test-session")
+    expect(decisions.length).toBe(2)
+    expect(decisions[0].feature).toBe("f1")
+    expect(decisions[1].feature).toBe("f2")
+  })
+
+  it("returns empty array for missing file", () => {
+    const decisions = horizon.readHorizonDecisions("nonexistent")
+    expect(decisions).toEqual([])
+  })
+})
+
+describe("Horizon Research Cache", () => {
+  it("writes and reads research", () => {
+    horizon.writeHorizonResearch("test-session", "# Findings\nTest content", {
+      "source1": "https://example.com",
+    })
+
+    const research = horizon.readHorizonResearch("test-session")
+    expect(research.findings).toBe("# Findings\nTest content")
+    expect(research.sources["source1"]).toBe("https://example.com")
+  })
+
+  it("returns empty for missing research", () => {
+    const research = horizon.readHorizonResearch("nonexistent")
+    expect(research.findings).toBeNull()
+    expect(research.sources).toEqual({})
+  })
+})
+
+describe("Horizon Skills", () => {
+  it("creates and lists skills", () => {
+    horizon.createHorizonSkill("test-session", "my-skill", "A test skill", "# My Skill\nContent")
+    const skills = horizon.listHorizonSkills("test-session")
+    expect(skills).toContain("my-skill")
+  })
+
+  it("registers skill in plan.json", () => {
+    // Init session first
+    horizon.initHorizonSession("test-session", "Test", "full")
+
+    horizon.createHorizonSkill("test-session", "react-patterns", "React patterns", "# React\nContent")
+    const plan = horizon.readHorizonPlan("test-session")
+    expect(plan!.skills.sessionScoped).toContain("react-patterns")
+  })
+})
+
+describe("Horizon Traces", () => {
+  it("saves and lists traces", () => {
+    horizon.saveHorizonSubAgentTrace("test-session", "sub-agent-1", '{"test": true}')
+    const traces = horizon.listHorizonTraces("test-session")
+    expect(traces).toContain("sub-agent-1")
+  })
+})
+
+describe("Horizon Session Listing", () => {
+  it("lists sessions from index", () => {
+    horizon.initHorizonSession("session-a", "Goal A", "full")
+    horizon.initHorizonSession("session-b", "Goal B", "semi")
+
+    const sessions = horizon.listHorizonSessions()
+    expect(sessions.length).toBe(2)
+    expect(sessions.map((s) => s.id)).toContain("session-a")
+    expect(sessions.map((s) => s.id)).toContain("session-b")
+  })
+
+  it("returns empty array when no sessions exist", () => {
+    const sessions = horizon.listHorizonSessions()
+    expect(sessions).toEqual([])
+  })
+})
+
+describe("Horizon Session Status", () => {
+  it("returns comprehensive status for complete session", () => {
+    horizon.initHorizonSession("test-session", "Test", "full")
+
+    // Add some data
+    const plan = makeSamplePlan("test-session")
+    horizon.writeHorizonPlan("test-session", plan)
+    horizon.writeHorizonState("test-session", {
+      sessionId: "test-session",
+      currentPhase: "execute",
+      activeSubAgents: [],
+      currentMilestoneId: "m1",
+      currentFeatureId: "f1",
+      lastCheckpoint: null,
+      pausedAt: null,
+      pauseReason: null,
+    })
+    horizon.appendHorizonDecision("test-session", {
+      timestamp: "2026-01-01T00:00:00Z",
+      feature: "f1",
+      ambiguity: "Q",
+      researchResult: "R",
+      decision: "D",
+      rationale: "R",
+      confidence: "high",
+    })
+    horizon.createHorizonSkill("test-session", "test-skill", "A skill", "Content")
+
+    const status = horizon.getHorizonSessionStatus("test-session")
+    expect(status.plan).not.toBeNull()
+    expect(status.state).not.toBeNull()
+    expect(status.decisions.length).toBe(1)
+    expect(status.skills).toContain("test-skill")
+    expect(status.research.findings).toBeNull() // No research written
+  })
+})

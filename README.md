@@ -1,10 +1,10 @@
 # PARALLAX ENGINE
 
-**OpenCode plugin** -- friction-loop verification, protocol enforcement, mode switching (plan/build/debug), and structured reasoning traces.
+**OpenCode plugin** -- protocol enforcement, mode switching (plan/build/debug/horizon), structured reasoning traces, friction-loop verification, and autonomous long-horizon supervision.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/parallax-opencode)](https://www.npmjs.com/package/parallax-opencode)
-[![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-56%20passing-brightgreen)]()
 
 ---
 
@@ -16,13 +16,24 @@ npx parallax-opencode
 
 Restart OpenCode. The plugin hooks and tools are auto-loaded.
 
-The plugin stores runtime state at `~/.parallax/state.json` (plugin process runs from user home directory).
+The plugin stores runtime state at `~/.parallax/` (plugin process runs from user home directory).
 
 ---
 
 ## What It Does
 
-### Protocol Enforcement (6 steps)
+### Two Agent Modes
+
+The plugin provides **two agent tabs**, switch between them with `[Tab]`:
+
+| Agent | Mode | When to Use |
+|---|---|---|
+| **Parallax** | Plan / Build / Debug | Interactive reasoning with protocol enforcement |
+| **Horizon** | Autonomous Supervisor | Multi-hour/multi-day unattended execution |
+
+---
+
+### PARALLAX AGENT -- Protocol Enforcement (6 steps)
 
 The Parallax agent follows a structured reasoning protocol before writing code. The plugin enforces this via the `tool.execute.before` hook:
 
@@ -64,9 +75,58 @@ Based on [@acidgreenservers AGENTS.md](https://gist.github.com/acidgreenservers/
 
 ---
 
+### HORIZON AGENT -- Autonomous Long-Horizon Supervisor
+
+The **Horizon** agent is a self-driving project supervisor for multi-hour/multi-day tasks. It plans, researches, executes, self-tests, and self-iterates until a goal is 100% complete without needing mid-execution user input.
+
+#### Workflow
+
+| Phase | What Happens |
+|---|---|
+| 1. RESEARCH | Parses goal, web searches best practices, analyzes codebase, synthesizes findings |
+| 2. PLAN | Decomposes goal into milestones + features with acceptance criteria and complexity estimates |
+| 3. EXECUTE LOOP | Dispatches sub-agents, runs tests, self-evaluates across 6 dimensions, retries up to 3x per feature |
+| 4. FINAL AUDIT | Runs Universal Auditor, full test suite, exports traces, generates completion report |
+
+#### Self-Check Evaluation (6 Dimensions)
+
+After every sub-agent, Horizon scores output across 6 weighted dimensions:
+
+| Dimension | Weight | Check |
+|---|---|---|
+| Protocol Integrity | 15% | All Parallax steps completed? |
+| Verification | 25% | Tests pass? No lint errors? |
+| Correctness | 25% | Matches acceptance criteria? |
+| Design Quality | 15% | AI slop detected? |
+| Edge Case Coverage | 10% | Error paths handled? |
+| User Perspective | 10% | Intuitive for all skill levels? |
+
+**Pass threshold:** >= 75% weighted score. Automatic retry on failure (up to 3 cycles).
+
+#### Autonomous Decision Engine
+
+When Horizon encounters ambiguity, it autonomously:
+1. Identifies the ambiguity
+2. Researches (web search, codebase, project conventions)
+3. Decides using best-guess heuristics (preferring conservative defaults)
+4. Documents the decision in `decisions.jsonl` for post-hoc review
+5. Proceeds without blocking
+
+#### Autonomy Levels
+
+| Level | Behavior |
+|---|---|
+| `full` | No user interaction. All decisions auto-resolved. |
+| `semi` | Milestone boundaries require user approval. |
+| `supervised` | Every feature requires user approval before dispatch. |
+
+---
+
 ## Plugin Tools
 
 These are called by the AI in OpenCode chat:
+
+### Parallax Tools (9)
 
 | Tool | Purpose |
 |---|---|
@@ -77,6 +137,57 @@ These are called by the AI in OpenCode chat:
 | `parallax_trace_export` | Export session trace to JSON |
 | `parallax_trace_pr_comment` | Generate trace as PR-ready markdown |
 | `parallax_trace_view` | Show full reasoning trace inline |
+
+### Horizon Tools (18)
+
+#### Session Management
+| Tool | Purpose |
+|---|---|
+| `horizon_init_session` | Initialize session directory + plan.json, state.json, decisions.jsonl, research/, skills/, traces/ |
+| `horizon_list_sessions` | List all Horizon sessions from the index |
+| `horizon_session_status` | Full status snapshot (plan, state, decisions, research, skills, traces) |
+
+#### Plan Management
+| Tool | Purpose |
+|---|---|
+| `horizon_write_plan` | Write/update plan.json (milestones + features) |
+| `horizon_read_plan` | Read current plan with progress (% complete) |
+| `horizon_write_state` | Write orchestration state (phase, active items) |
+| `horizon_read_state` | Read current orchestration state |
+
+#### Feature/Milestone Tracking
+| Tool | Purpose |
+|---|---|
+| `horizon_update_feature` | Update feature status + auto-recalculate stats + retry cap enforcement |
+| `horizon_update_milestone` | Update milestone status |
+
+#### Decision Audit
+| Tool | Purpose |
+|---|---|
+| `horizon_append_decision` | Log auto-decision to decisions.jsonl |
+| `horizon_read_decisions` | Read the full decision audit log |
+
+#### Research Cache
+| Tool | Purpose |
+|---|---|
+| `horizon_write_research` | Write findings.md + sources.json |
+| `horizon_read_research` | Read cached research |
+
+#### Session-Scoped Skills
+| Tool | Purpose |
+|---|---|
+| `horizon_create_skill` | Create a session-scoped skill (SKILL.md + plan.json registration) |
+| `horizon_list_skills` | List session-scoped skills |
+
+#### Trace Archiving
+| Tool | Purpose |
+|---|---|
+| `horizon_save_trace` | Archive a sub-agent trace in traces/ |
+
+#### Configuration
+| Tool | Purpose |
+|---|---|
+| `horizon_config` | Read or write Horizon global configuration |
 
 ---
 
@@ -106,16 +217,40 @@ Parallax Agent (system prompt)
   |     experimental.session.compacting     --> state preservation + trace export
   |     shell.env                   --> PARALLAX_MODE, PARALLAX_SESSION_ID in shell
   |
-  +-- Custom tools (9)
+  +-- Parallax custom tools (9)
   |     parallax_verify, parallax_analyze, parallax_checkin,
   |     parallax_plan / _build / _debug,
   |     parallax_trace_export / _pr_comment / _view
   |
-  +-- State (at ~/.parallax/)
+  +-- Horizon custom tools (18)
+  |     horizon_init_session, horizon_list_sessions, horizon_session_status,
+  |     horizon_write_plan, horizon_read_plan, horizon_write_state, horizon_read_state,
+  |     horizon_update_feature, horizon_update_milestone,
+  |     horizon_append_decision, horizon_read_decisions,
+  |     horizon_write_research, horizon_read_research,
+  |     horizon_create_skill, horizon_list_skills,
+  |     horizon_save_trace,
+  |     horizon_config,
+  |     horizon_evaluate_subagent
+  |
+  +-- Parallax State (~/.parallax/)
   |     state.json                  protocol state (immediate on checkins)
   |     traces/                     per-session JSON traces
   |     scores.jsonl                append-only score history
   |     config.json                 per-project config (optional)
+  |
+  +-- Horizon State (~/.parallax/horizon/)
+        config.json                global Horizon config
+        index.json                 session UUID -> goal summaries
+        sessions/<uuid>/
+          plan.json                structured plan (milestones + features)
+          state.json               orchestration state
+          decisions.jsonl          auto-decision audit log
+          research/
+            findings.md            synthesized research summary
+            sources.json           URL references with key excerpts
+          skills/<name>/SKILL.md   session-scoped skills
+          traces/                  sub-agent trace exports
 ```
 
 ---
@@ -148,16 +283,33 @@ Create `.parallax/config.json` in your project root:
 
 ```
 parallax_plugin/
-  agents/parallax.md            # Agent definition
-  src/plugin.ts                 # Plugin (~1000 lines)
-  src/types.ts                  # Shared types
-  src/detect.ts                 # Project detection
-  src/trace.ts                  # Trace recording + export
-  src/score.ts                  # Coherence score + analytics
-  src/cli.ts                    # CLI (CI only)
-  src/tests/                    # 30 tests across 5 files
-  dist-standalone/              # Bundled plugin (~37KB)
-  skills/                       # Parallax protocol skills
+  agents/
+    parallax.md                   # Parallax agent definition
+    horizon.md                    # Horizon agent definition
+  src/
+    plugin.ts                     # Plugin (~1900 lines, 27 tools)
+    types.ts                      # Shared types (includes Horizon types)
+    horizon.ts                    # Horizon persistence module (512 lines)
+    detect.ts                     # Project detection
+    trace.ts                      # Trace recording + export
+    score.ts                      # Coherence score + analytics
+    cli.ts                        # CLI (CI only)
+    tests/
+      trace.test.ts               # 6 tests
+      protocol.test.ts            # 5 tests
+      score.test.ts               # 5 tests
+      detect.test.ts              # 7 tests
+      friction.test.ts            # 7 tests
+      horizon.test.ts             # 26 tests
+  dist-standalone/                # Bundled plugin (~76KB)
+  skills/
+    parallax/                     # Parallax protocol skills
+    parallax-plan/                # PLAN mode skill
+    parallax-debug/               # DEBUG mode skill
+    horizon/                      # Horizon autonomous supervisor skill
+  scripts/
+    install.mjs                   # Local install script
+    publish.mjs                   # npm publish script
 ```
 
 ---

@@ -12,7 +12,7 @@
 // Core domain types
 // ---------------------------------------------------------------------------
 
-export type AgentMode = "free" | "plan" | "build" | "debug"
+export type AgentMode = "free" | "plan" | "build" | "debug" | "horizon"
 
 export type ProtocolStep = "ambiguity" | "invariants" | "gate" | "design" | "commit" | "summary"
 
@@ -141,6 +141,115 @@ export interface CliCommand {
   description: string
   usage: string
   run: (args: string[]) => Promise<number>
+}
+
+// ---------------------------------------------------------------------------
+// Horizon agent types
+// ---------------------------------------------------------------------------
+
+export type HorizonAutonomyLevel = "full" | "semi" | "supervised"
+
+export type HorizonPhase = "research" | "plan" | "execute" | "audit" | "complete"
+
+export type HorizonPlanStatus = "planning" | "executing" | "completed" | "failed"
+
+export type HorizonItemStatus = "pending" | "in_progress" | "completed" | "failed"
+
+export type HorizonProtocolLevel = "none" | "full"
+
+export interface HorizonPlan {
+  schemaVersion: string
+  sessionId: string
+  goal: string
+  autonomyLevel: HorizonAutonomyLevel
+  status: HorizonPlanStatus
+  createdAt: string
+  completedAt: string | null
+  milestones: HorizonMilestone[]
+  skills: {
+    global: string[]
+    sessionScoped: string[]
+  }
+  stats: {
+    totalFeatures: number
+    completedFeatures: number
+    failedFeatures: number
+    totalRetries: number
+    estimatedCost: number | null
+  }
+}
+
+export interface HorizonMilestone {
+  id: string
+  name: string
+  description: string
+  status: HorizonItemStatus
+  order: number
+  requiresApproval: boolean
+  features: HorizonFeature[]
+}
+
+export interface HorizonFeature {
+  id: string
+  name: string
+  description: string
+  acceptanceCriteria: string
+  protocolLevel: HorizonProtocolLevel
+  status: HorizonItemStatus
+  order: number
+  subAgentSessionId: string | null
+  attempts: number
+  maxAttempts: number
+  verification: {
+    passed: boolean
+    testResults: string | null
+    issues: string[]
+    score: number | null
+  }
+  skillsRequired: string[]
+  skillsGenerated: string[]
+}
+
+export interface HorizonState {
+  sessionId: string
+  currentPhase: HorizonPhase
+  activeSubAgents: string[]
+  currentMilestoneId: string | null
+  currentFeatureId: string | null
+  lastCheckpoint: string | null
+  pausedAt: string | null
+  pauseReason: string | null
+}
+
+export interface HorizonDecision {
+  timestamp: string
+  feature: string
+  ambiguity: string
+  researchResult: string
+  decision: string
+  rationale: string
+  confidence: "high" | "medium" | "low"
+}
+
+export interface HorizonSessionMeta {
+  goal: string
+  createdAt: string
+  status: HorizonPlanStatus
+  autonomyLevel: HorizonAutonomyLevel
+}
+
+export interface HorizonIndex {
+  sessions: Record<string, HorizonSessionMeta>
+}
+
+export interface HorizonConfig {
+  autonomyLevel: HorizonAutonomyLevel
+  autoApproveMilestones: boolean
+  maxRetryCycles: number
+  decisionConfidenceThreshold: number
+  pauseOnCriticalFailure: boolean
+  testCommand: string
+  lintCommand: string
 }
 
 // ---------------------------------------------------------------------------

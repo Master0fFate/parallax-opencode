@@ -22,6 +22,7 @@ import type {
   ModeState,
   ProtocolState,
   ParallaxConfig,
+  HorizonAutonomyLevel,
 } from "./types"
 import { detectProject, runVerify } from "./detect"
 import {
@@ -32,6 +33,7 @@ import {
   getTrace,
 } from "./trace"
 import { computeCoherenceScore } from "./score"
+import * as horizon from "./horizon"
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -274,10 +276,11 @@ interface ModeMeta {
 }
 
 const MODE_META: Record<AgentMode, ModeMeta> = {
-  free:  { skill: null,                    label: null },
-  build: { skill: null,                    label: "PARALLAX BUILD MODE" },
-  plan:  { skill: "parallax-plan",         label: "PARALLAX PLAN MODE" },
-  debug: { skill: "parallax-debug",        label: "PARALLAX DEBUG MODE" },
+  free:    { skill: null,                    label: null },
+  build:   { skill: null,                    label: "PARALLAX BUILD MODE" },
+  plan:    { skill: "parallax-plan",         label: "PARALLAX PLAN MODE" },
+  debug:   { skill: "parallax-debug",        label: "PARALLAX DEBUG MODE" },
+  horizon: { skill: "horizon",               label: "HORIZON MODE" },
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +520,782 @@ export default {
         },
       }),
 
+      // MODE: HORIZON
+      parallax_horizon: tool({
+        description:
+          "Switch to HORIZON mode. Activates the long-horizon autonomous " +
+          "supervisor agent that plans, researches, executes, self-tests, " +
+          "and self-iterates until the task is 100% complete. Orchestrates " +
+          "sub-agents with Parallax reasoning for deep work. Use for " +
+          "multi-hour to multi-day tasks spanning multiple files.",
+        args: {},
+        async execute() {
+          getMode().mode = "horizon"
+          addPhase(sessionId(), "mode_switch", { mode: "horizon" })
+          writeState()
+          return (
+            "[parallax] HORIZON mode activated. " +
+            "Long-horizon autonomous supervisor loaded. " +
+            "I will plan, research, execute, self-test, and self-iterate " +
+            "until the task is 100% complete."
+          )
+        },
+      }),
+
+      // -------------------------------------------------------------------
+      // HORIZON TOOLS -- persistence & orchestration
+      // -------------------------------------------------------------------
+
+      // HORIZON INIT SESSION
+      horizon_init_session: tool({
+        description:
+          "Initialize a new Horizon session directory with plan.json, state.json, " +
+          "and index entry. Creates the full directory tree: research/, skills/, traces/. " +
+          "Call this at the start of a Horizon task.",
+        args: {
+          sessionId: tool.schema.string().describe(
+            "Unique session ID (e.g., 'session-001')",
+          ),
+          goal: tool.schema.string().describe(
+            "The user's original goal statement",
+          ),
+          autonomyLevel: tool.schema.string().optional().describe(
+            "Autonomy level: full, semi, or supervised (default: full)",
+          ),
+        },
+        async execute(args: {
+          sessionId: string
+          goal: string
+          autonomyLevel?: string
+        }) {
+          const level = (
+            args.autonomyLevel || "full"
+          ) as HorizonAutonomyLevel
+          if (!["full", "semi", "supervised"].includes(level)) {
+            return "[horizon] ERROR: autonomyLevel must be 'full', 'semi', or 'supervised'."
+          }
+          horizon.initHorizonSession(args.sessionId, args.goal, level)
+          client.app.log({
+            body: {
+              service: "horizon",
+              level: "info",
+              message: `[horizon] Session '${args.sessionId}' initialized. Goal: ${args.goal.slice(0, 80)}`,
+            },
+          }).catch(() => {})
+          return (
+            `[horizon] Session initialized: ${args.sessionId}\n` +
+            `Goal: ${args.goal.slice(0, 120)}\n` +
+            `Autonomy: ${level}\n` +
+            `Directory: ~/.parallax/horizon/sessions/${args.sessionId}/`
+          )
+        },
+      }),
+
+      // HORIZON WRITE PLAN
+      horizon_write_plan: tool({
+        description:
+          "Write or update the plan.json for a Horizon session. Expects the full " +
+          "plan object. Validates required fields. Use after defining milestones " +
+          "and features during the PLAN phase.",
+        args: {
+          sessionId: tool.schema.string().describe(
+            "Session ID to write the plan for",
+          ),
+          planJson: tool.schema.string().describe(
+            "The full plan object as a JSON string. Must include schemaVersion, " +
+            "milestones array, and stats object.",
+          ),
+        },
+        async execute(args: { sessionId: string; planJson: string }) {
+          try {
+            const plan = JSON.parse(args.planJson)
+            if (!plan.schemaVersion || !Array.isArray(plan.milestones)) {
+              return (
+                "[horizon] ERROR: Invalid plan -- must include schemaVersion " +
+                "and milestones array."
+              )
+            }
+            horizon.writeHorizonPlan(args.sessionId, plan)
+            const features = plan.milestones.reduce(
+              (acc: number, m: { features?: unknown[] }) =>
+                acc + (m.features ? m.features.length : 0),
+              0,
+            )
+            return (
+              `[horizon] Plan written for session: ${args.sessionId}\n` +
+              `Milestones: ${plan.milestones.length}, Features: ${features}`
+            )
+          } catch (e) {
+            return `[horizon] ERROR: Invalid JSON in planJson -- ${String(e)}`
+          }
+        },
+      }),
+
+      // HORIZON READ PLAN
+      horizon_read_plan: tool({
+        description:
+          "Read the current plan.json for a Horizon session. Returns the full " +
+          "plan object including milestones, features, stats, and skills. " +
+          "Use to check progress during execution.",
+        args: {
+          sessionId: tool.schema.string().describe(
+            "Session ID to read the plan from",
+          ),
+        },
+        async execute(args: { sessionId: string }) {
+          const plan = horizon.readHorizonPlan(args.sessionId)
+          if (!plan) {
+            return "[horizon] No plan found for this session."
+          }
+          const completed = plan.stats.completedFeatures
+          const total = plan.stats.totalFeatures
+          const pct = total > 0 ? Math.round((completed / total) * 100) : 0
+          return (
+            `[horizon] Plan for session: ${args.sessionId}\n` +
+            `Status: ${plan.status}\n` +
+            `Progress: ${completed}/${total} features (${pct}%)\n` +
+            `Milestones: ${plan.milestones.length}\n` +
+            `Retries: ${plan.stats.totalRetries}\n` +
+            `Autonomy: ${plan.autonomyLevel}\n\n` +
+            `Full plan:\n${JSON.stringify(plan, null, 2)}`
+          )
+        },
+      }),
+
+      // HORIZON UPDATE FEATURE
+      horizon_update_feature: tool({
+        description:
+          "Update a single feature's status within a plan. Updates the feature " +
+          "and recalculates plan stats (completed/failed/total). Use after a " +
+          "sub-agent completes or fails.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+          featureId: tool.schema.string().describe(
+            "Feature ID to update (e.g., 'feat-001')",
+          ),
+          status: tool.schema.string().describe(
+            "New status: pending, in_progress, completed, or failed",
+          ),
+          subAgentSessionId: tool.schema.string().optional().describe(
+            "Sub-agent session ID if one was dispatched",
+          ),
+        },
+        async execute(args: {
+          sessionId: string
+          featureId: string
+          status: string
+          subAgentSessionId?: string
+        }) {
+          const validStatuses = ["pending", "in_progress", "completed", "failed"]
+          if (!validStatuses.includes(args.status)) {
+            return (
+              `[horizon] ERROR: Invalid status '${args.status}'. ` +
+              `Must be one of: ${validStatuses.join(", ")}`
+            )
+          }
+          const updates: Record<string, unknown> = { status: args.status }
+          if (args.subAgentSessionId) {
+            updates.subAgentSessionId = args.subAgentSessionId
+          }
+          if (args.status === "in_progress") {
+            const plan = horizon.readHorizonPlan(args.sessionId)
+            if (plan) {
+              const feature = plan.milestones
+                .flatMap((m) => m.features)
+                .find((f) => f.id === args.featureId)
+              if (feature) {
+                // RETRY CAP ENFORCEMENT: reject if max retries exceeded
+                const config = horizon.loadHorizonConfig()
+                if (feature.attempts >= (feature.maxAttempts || config.maxRetryCycles)) {
+                  return (
+                    `[horizon] RETRY CAP REACHED for '${args.featureId}'. ` +
+                    `Attempts: ${feature.attempts}/${feature.maxAttempts || config.maxRetryCycles}. ` +
+                    `Mark the feature as 'failed' to move on, or adjust maxRetryCycles in config.`
+                  )
+                }
+                updates.attempts = feature.attempts + 1
+              }
+            }
+          }
+          const result = horizon.updateHorizonFeature(
+            args.sessionId,
+            args.featureId,
+            updates as any,
+          )
+          if (!result) {
+            return `[horizon] Feature '${args.featureId}' not found in session ${args.sessionId}.`
+          }
+
+          // Progress reporting
+          const pct = result.stats.totalFeatures > 0
+            ? Math.round((result.stats.completedFeatures / result.stats.totalFeatures) * 100)
+            : 0
+          const lvl = args.status === "failed" ? "error" : args.status === "completed" ? "info" : "warn"
+          client.app.log({
+            body: {
+              service: "horizon",
+              level: lvl,
+              message:
+                `[horizon] Feature '${args.featureId}' -> ${args.status}. ` +
+                `Progress: ${result.stats.completedFeatures}/${result.stats.totalFeatures} (${pct}%)`,
+            },
+          }).catch(() => {})
+
+          return (
+            `[horizon] Feature '${args.featureId}' updated to '${args.status}'\n` +
+            `Progress: ${result.stats.completedFeatures}/${result.stats.totalFeatures} (${pct}%)`
+          )
+        },
+      }),
+
+      // HORIZON UPDATE MILESTONE
+      horizon_update_milestone: tool({
+        description:
+          "Update a milestone's status. Use when a milestone's features are " +
+          "all complete and you want to mark the milestone done.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+          milestoneId: tool.schema.string().describe(
+            "Milestone ID to update",
+          ),
+          status: tool.schema.string().describe(
+            "New status: pending, in_progress, completed, or failed",
+          ),
+        },
+        async execute(args: {
+          sessionId: string
+          milestoneId: string
+          status: string
+        }) {
+          const validStatuses = ["pending", "in_progress", "completed", "failed"]
+          if (!validStatuses.includes(args.status)) {
+            return (
+              `[horizon] ERROR: Invalid status '${args.status}'. ` +
+              `Must be one of: ${validStatuses.join(", ")}`
+            )
+          }
+          const result = horizon.updateHorizonMilestone(
+            args.sessionId,
+            args.milestoneId,
+            args.status as any,
+          )
+          if (!result) {
+            return `[horizon] Milestone '${args.milestoneId}' not found.`
+          }
+          return `[horizon] Milestone '${args.milestoneId}' updated to '${args.status}'.`
+        },
+      }),
+
+      // HORIZON WRITE STATE
+      horizon_write_state: tool({
+        description:
+          "Write or update the orchestration state.json for a Horizon session. " +
+          "Use to track which phase Horizon is in, which milestone/feature is " +
+          "active, and any pause state.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+          stateJson: tool.schema.string().describe(
+            "Partial or full state object as JSON. Fields provided will be merged " +
+            "into existing state. The lastCheckpoint is auto-set.",
+          ),
+        },
+        async execute(args: { sessionId: string; stateJson: string }) {
+          try {
+            const updates = JSON.parse(args.stateJson)
+            const existing = horizon.readHorizonState(args.sessionId) || {
+              sessionId: args.sessionId,
+              currentPhase: "research",
+              activeSubAgents: [],
+              currentMilestoneId: null,
+              currentFeatureId: null,
+              lastCheckpoint: null,
+              pausedAt: null,
+              pauseReason: null,
+            }
+            const merged = { ...existing, ...updates, sessionId: args.sessionId }
+            horizon.writeHorizonState(args.sessionId, merged)
+            return (
+              `[horizon] State updated for session: ${args.sessionId}\n` +
+              `Phase: ${merged.currentPhase}`
+            )
+          } catch (e) {
+            return `[horizon] ERROR: Invalid JSON in stateJson -- ${String(e)}`
+          }
+        },
+      }),
+
+      // HORIZON READ STATE
+      horizon_read_state: tool({
+        description:
+          "Read the current orchestration state.json. Use to check which phase " +
+          "is active, what milestone/feature is being worked on, and any pause state.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+        },
+        async execute(args: { sessionId: string }) {
+          const state = horizon.readHorizonState(args.sessionId)
+          if (!state) {
+            return "[horizon] No state found for this session."
+          }
+          return (
+            `[horizon] State for session: ${args.sessionId}\n` +
+            `Phase: ${state.currentPhase}\n` +
+            `Active sub-agents: ${state.activeSubAgents.length}\n` +
+            `Current milestone: ${state.currentMilestoneId || "none"}\n` +
+            `Current feature: ${state.currentFeatureId || "none"}\n` +
+            `Last checkpoint: ${state.lastCheckpoint || "never"}\n` +
+            (state.pausedAt
+              ? `Paused at: ${state.pausedAt} (reason: ${state.pauseReason || "unknown"})`
+              : "Not paused")
+          )
+        },
+      }),
+
+      // HORIZON APPEND DECISION
+      horizon_append_decision: tool({
+        description:
+          "Log an autonomous decision to the session's decisions.jsonl. " +
+          "Every auto-resolved ambiguity should be documented here for post-hoc review.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+          feature: tool.schema.string().describe(
+            "Feature ID this decision relates to",
+          ),
+          ambiguity: tool.schema.string().describe(
+            "What was ambiguous or unclear",
+          ),
+          researchResult: tool.schema.string().describe(
+            "What research or analysis was done",
+          ),
+          decision: tool.schema.string().describe(
+            "What was decided",
+          ),
+          rationale: tool.schema.string().describe(
+            "Why this decision was made",
+          ),
+          confidence: tool.schema.string().optional().describe(
+            "Confidence: high, medium, or low (default: medium)",
+          ),
+        },
+        async execute(args: {
+          sessionId: string
+          feature: string
+          ambiguity: string
+          researchResult: string
+          decision: string
+          rationale: string
+          confidence?: string
+        }) {
+          const decision = {
+            timestamp: new Date().toISOString(),
+            feature: args.feature,
+            ambiguity: args.ambiguity,
+            researchResult: args.researchResult,
+            decision: args.decision,
+            rationale: args.rationale,
+            confidence: (args.confidence || "medium") as "high" | "medium" | "low",
+          }
+          horizon.appendHorizonDecision(args.sessionId, decision)
+          return (
+            `[horizon] Decision logged for feature '${args.feature}': ` +
+            `${args.decision.slice(0, 80)}`
+          )
+        },
+      }),
+
+      // HORIZON READ DECISIONS
+      horizon_read_decisions: tool({
+        description:
+          "Read all logged decisions from the session's decisions.jsonl. " +
+          "Returns a chronological list of auto-decisions with rationale.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+        },
+        async execute(args: { sessionId: string }) {
+          const decisions = horizon.readHorizonDecisions(args.sessionId)
+          if (decisions.length === 0) {
+            return "[horizon] No decisions logged for this session."
+          }
+          const lines = decisions.map(
+            (d, i) =>
+              `  ${i + 1}. [${d.confidence}] ${d.feature}: ${d.decision.slice(0, 100)}`,
+          )
+          return (
+            `[horizon] Decision log for session: ${args.sessionId}\n` +
+            `Total: ${decisions.length} decisions\n\n` +
+            lines.join("\n")
+          )
+        },
+      }),
+
+      // HORIZON WRITE RESEARCH
+      horizon_write_research: tool({
+        description:
+          "Write research findings and sources for a session. Stores to " +
+          "research/findings.md and research/sources.json. Call after the " +
+          "RESEARCH phase to cache context.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+          findings: tool.schema.string().describe(
+            "Structured research findings as markdown text",
+          ),
+          sourcesJson: tool.schema.string().optional().describe(
+            "Optional JSON object mapping URL labels to URLs, as a JSON string",
+          ),
+        },
+        async execute(args: {
+          sessionId: string
+          findings: string
+          sourcesJson?: string
+        }) {
+          let sources: Record<string, string> = {}
+          if (args.sourcesJson) {
+            try {
+              sources = JSON.parse(args.sourcesJson)
+            } catch {
+              return "[horizon] ERROR: sourcesJson must be a valid JSON object."
+            }
+          }
+          horizon.writeHorizonResearch(args.sessionId, args.findings, sources)
+          return (
+            `[horizon] Research written for session: ${args.sessionId}\n` +
+            `Findings: ${args.findings.length} chars\n` +
+            `Sources: ${Object.keys(sources).length} entries`
+          )
+        },
+      }),
+
+      // HORIZON READ RESEARCH
+      horizon_read_research: tool({
+        description:
+          "Read research findings and sources for a session. Returns the " +
+          "synthesized research summary and cached URL references.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+        },
+        async execute(args: { sessionId: string }) {
+          const research = horizon.readHorizonResearch(args.sessionId)
+          if (!research.findings && Object.keys(research.sources).length === 0) {
+            return "[horizon] No research found for this session."
+          }
+          let out = `[horizon] Research for session: ${args.sessionId}\n`
+          if (research.findings) {
+            out += `\nFindings:\n${research.findings.slice(0, 2000)}`
+            if (research.findings.length > 2000) out += "\n... [truncated]"
+          }
+          if (Object.keys(research.sources).length > 0) {
+            out += "\n\nSources:\n"
+            out += Object.entries(research.sources)
+              .map(([k, v]) => `  ${k}: ${v}`)
+              .join("\n")
+          }
+          return out
+        },
+      }),
+
+      // HORIZON CREATE SKILL
+      horizon_create_skill: tool({
+        description:
+          "Create a session-scoped skill in the session's skills directory. " +
+          "Use when the PLAN phase identifies a gap where a custom skill would " +
+          "improve sub-agent output quality. Registers the skill in plan.json.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+          name: tool.schema.string().describe(
+            "Skill name (kebab-case, e.g., 'react-patterns')",
+          ),
+          description: tool.schema.string().describe(
+            "Short description of what this skill does",
+          ),
+          content: tool.schema.string().describe(
+            "Full skill markdown content (without YAML frontmatter)",
+          ),
+        },
+        async execute(args: {
+          sessionId: string
+          name: string
+          description: string
+          content: string
+        }) {
+          horizon.createHorizonSkill(
+            args.sessionId,
+            args.name,
+            args.description,
+            args.content,
+          )
+          return (
+            `[horizon] Skill created: ${args.name}\n` +
+            `Path: ~/.parallax/horizon/sessions/${args.sessionId}/skills/${args.name}/SKILL.md`
+          )
+        },
+      }),
+
+      // HORIZON LIST SKILLS
+      horizon_list_skills: tool({
+        description:
+          "List all session-scoped skills created for a session.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+        },
+        async execute(args: { sessionId: string }) {
+          const skills = horizon.listHorizonSkills(args.sessionId)
+          if (skills.length === 0) {
+            return "[horizon] No session-scoped skills for this session."
+          }
+          return (
+            `[horizon] Skills for session: ${args.sessionId}\n` +
+            skills.map((s) => `  - ${s}`).join("\n")
+          )
+        },
+      }),
+
+      // HORIZON SAVE TRACE
+      horizon_save_trace: tool({
+        description:
+          "Archive a sub-agent's trace data into the session's traces/ directory. " +
+          "Call when a sub-agent completes to preserve its reasoning trace for audit.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+          subAgentSessionId: tool.schema.string().describe(
+            "The sub-agent's session ID",
+          ),
+          traceData: tool.schema.string().describe(
+            "The full trace JSON string to archive",
+          ),
+        },
+        async execute(args: {
+          sessionId: string
+          subAgentSessionId: string
+          traceData: string
+        }) {
+          horizon.saveHorizonSubAgentTrace(
+            args.sessionId,
+            args.subAgentSessionId,
+            args.traceData,
+          )
+          return (
+            `[horizon] Trace archived for sub-agent: ${args.subAgentSessionId}\n` +
+            `Path: ~/.parallax/horizon/sessions/${args.sessionId}/traces/${args.subAgentSessionId}.json`
+          )
+        },
+      }),
+
+      // HORIZON LIST SESSIONS
+      horizon_list_sessions: tool({
+        description:
+          "List all Horizon sessions from the index. Returns UUID, goal, " +
+          "status, autonomy level, and creation date for each session.",
+        args: {},
+        async execute() {
+          const sessions = horizon.listHorizonSessions()
+          if (sessions.length === 0) {
+            return "[horizon] No sessions found."
+          }
+          const lines = sessions.map(
+            (s) =>
+              `  ${s.id} | ${s.meta.status} | ${s.meta.autonomyLevel} | ` +
+              `${s.meta.createdAt.slice(0, 10)} | ${s.meta.goal.slice(0, 60)}`,
+          )
+          return (
+            `[horizon] Sessions (${sessions.length}):\n\n` +
+            lines.join("\n")
+          )
+        },
+      }),
+
+      // HORIZON SESSION STATUS
+      horizon_session_status: tool({
+        description:
+          "Get a comprehensive status snapshot of a session: plan progress, " +
+          "current phase, decisions logged, research cached, skills created, " +
+          "and traces archived.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+        },
+        async execute(args: { sessionId: string }) {
+          const status = horizon.getHorizonSessionStatus(args.sessionId)
+          if (!status.plan && !status.state) {
+            return `[horizon] No session found: ${args.sessionId}`
+          }
+          const plan = status.plan
+          const state = status.state
+          const pct = plan && plan.stats.totalFeatures > 0
+            ? Math.round((plan.stats.completedFeatures / plan.stats.totalFeatures) * 100)
+            : 0
+
+          return (
+            `[horizon] Session status: ${args.sessionId}\n\n` +
+            `Plan: ${plan ? plan.status : "N/A"}\n` +
+            `Phase: ${state ? state.currentPhase : "N/A"}\n` +
+            `Progress: ${plan ? `${plan.stats.completedFeatures}/${plan.stats.totalFeatures} (${pct}%)` : "N/A"}\n` +
+            `Decisions: ${status.decisions.length} logged\n` +
+            `Research: ${status.research.findings ? `${status.research.findings.length} chars` : "none"}\n` +
+            `Skills: ${status.skills.length} session-scoped\n` +
+            `Traces: ${status.traces.length} archived\n` +
+            `Autonomy: ${plan ? plan.autonomyLevel : "N/A"}\n` +
+            `Retries: ${plan ? plan.stats.totalRetries : 0}\n` +
+            (state?.pausedAt ? `\n[PAUSED] ${state.pauseReason || "Unknown reason"}` : "")
+          )
+        },
+      }),
+
+      // HORIZON EVALUATE SUB-AGENT -- 6-dimension weighted self-check
+      horizon_evaluate_subagent: tool({
+        description:
+          "Evaluate a sub-agent's output across 6 dimensions with weighted scoring. " +
+          "Scores each dimension 0-100. Pass threshold is 75% weighted total. " +
+          "Logs result to decisions.jsonl and updates feature verification state.",
+        args: {
+          sessionId: tool.schema.string().describe("Session ID"),
+          featureId: tool.schema.string().describe(
+            "Feature ID this evaluation relates to",
+          ),
+          protocolIntegrity: tool.schema.number().describe(
+            "Score 0-100: All Parallax steps completed? Coherence >= 60?",
+          ),
+          verification: tool.schema.number().describe(
+            "Score 0-100: Tests pass? No lint errors?",
+          ),
+          correctness: tool.schema.number().describe(
+            "Score 0-100: Output matches acceptance criteria? No logical errors?",
+          ),
+          designQuality: tool.schema.number().describe(
+            "Score 0-100: AI slop detected? Follows project conventions?",
+          ),
+          edgeCaseCoverage: tool.schema.number().describe(
+            "Score 0-100: Null/empty states? Error paths? Boundary conditions?",
+          ),
+          userPerspective: tool.schema.number().describe(
+            "Score 0-100: Works for novice and pro? Intuitive?",
+          ),
+        },
+        async execute(args: {
+          sessionId: string
+          featureId: string
+          protocolIntegrity: number
+          verification: number
+          correctness: number
+          designQuality: number
+          edgeCaseCoverage: number
+          userPerspective: number
+        }) {
+          const dims = [
+            { key: "protocolIntegrity", label: "Protocol Integrity", score: args.protocolIntegrity, weight: 0.15 },
+            { key: "verification",      label: "Verification",       score: args.verification,      weight: 0.25 },
+            { key: "correctness",       label: "Correctness",        score: args.correctness,       weight: 0.25 },
+            { key: "designQuality",     label: "Design Quality",     score: args.designQuality,     weight: 0.15 },
+            { key: "edgeCaseCoverage",  label: "Edge Case Coverage", score: args.edgeCaseCoverage,  weight: 0.10 },
+            { key: "userPerspective",   label: "User Perspective",   score: args.userPerspective,   weight: 0.10 },
+          ]
+
+          // Validate each dimension
+          for (const d of dims) {
+            if (d.score < 0 || d.score > 100 || !Number.isFinite(d.score)) {
+              return (
+                `[horizon] ERROR: ${d.label} must be a number between 0-100. Got ${d.score}.`
+              )
+            }
+          }
+
+          const weightedScore = Math.round(
+            dims.reduce((sum, d) => sum + d.score * d.weight, 0),
+          )
+          const passed = weightedScore >= 75
+
+          // Build breakdown table
+          const breakdown = dims.map(
+            (d) => `  ${d.label.padEnd(22)} ${String(d.score).padStart(3)}/100 x ${(d.weight * 100)}% = ${Math.round(d.score * d.weight)}`,
+          ).join("\n")
+
+          // Log the evaluation as a decision
+          const verdict = passed ? "PASS" : "FAIL"
+          horizon.appendHorizonDecision(args.sessionId, {
+            timestamp: new Date().toISOString(),
+            feature: args.featureId,
+            ambiguity: `Self-check evaluation for feature ${args.featureId}`,
+            researchResult: `6-dimension weighted scoring: ${weightedScore}/100`,
+            decision: `${verdict} (threshold: 75%)`,
+            rationale: breakdown.replace(/\n/g, "; "),
+            confidence: passed ? "high" : "medium",
+          })
+
+          // Update feature verification state
+          horizon.updateHorizonFeature(args.sessionId, args.featureId, {
+            verification: {
+              passed,
+              testResults: null,
+              issues: passed ? [] : [`Self-check scored ${weightedScore}/100, below 75% threshold`],
+              score: weightedScore,
+            },
+          } as any)
+
+          // Progress reporting
+          client.app.log({
+            body: {
+              service: "horizon",
+              level: passed ? "info" : "warn",
+              message:
+                `[horizon] Self-check for '${args.featureId}': ${verdict} ` +
+                `(${weightedScore}/100, threshold: 75)`,
+            },
+          }).catch(() => {})
+
+          return (
+            `[horizon] Self-check evaluation for '${args.featureId}': ${verdict}\n` +
+            `Weighted score: ${weightedScore}/100 (threshold: 75)\n\n` +
+            `Breakdown:\n${breakdown}\n\n` +
+            (passed
+              ? "All dimensions pass. Feature ready for next step."
+              : `Below threshold. Review the low-scoring dimensions and re-dispatch.`)
+          )
+        },
+      }),
+
+      // HORIZON CONFIG
+      horizon_config: tool({
+        description:
+          "Read or write the Horizon global configuration. With no configJson, " +
+          "returns current config. With configJson, merges and saves.",
+        args: {
+          configJson: tool.schema.string().optional().describe(
+            "Optional JSON string with config fields to set. Fields: " +
+            "autonomyLevel, autoApproveMilestones, maxRetryCycles, " +
+            "decisionConfidenceThreshold, pauseOnCriticalFailure, " +
+            "testCommand, lintCommand.",
+          ),
+        },
+        async execute(args: { configJson?: string }) {
+          if (args.configJson) {
+            try {
+              const updates = JSON.parse(args.configJson)
+              const existing = horizon.loadHorizonConfig()
+              const merged = { ...existing, ...updates }
+              horizon.saveHorizonConfig(merged)
+              return (
+                `[horizon] Config updated:\n` +
+                `  autonomyLevel: ${merged.autonomyLevel}\n` +
+                `  maxRetryCycles: ${merged.maxRetryCycles}\n` +
+                `  testCommand: ${merged.testCommand}\n` +
+                `  lintCommand: ${merged.lintCommand}`
+              )
+            } catch (e) {
+              return `[horizon] ERROR: Invalid JSON in configJson -- ${String(e)}`
+            }
+          }
+          const config = horizon.loadHorizonConfig()
+          return (
+            `[horizon] Current config:\n` +
+            `  autonomyLevel: ${config.autonomyLevel}\n` +
+            `  autoApproveMilestones: ${config.autoApproveMilestones}\n` +
+            `  maxRetryCycles: ${config.maxRetryCycles}\n` +
+            `  decisionConfidenceThreshold: ${config.decisionConfidenceThreshold}\n` +
+            `  pauseOnCriticalFailure: ${config.pauseOnCriticalFailure}\n` +
+            `  testCommand: ${config.testCommand}\n` +
+            `  lintCommand: ${config.lintCommand}`
+          )
+        },
+      }),
+
       // TRACE EXPORT -- export current session trace to file
       parallax_trace_export: tool({
         description:
@@ -699,8 +1478,24 @@ export default {
     // Pre-write enforcement: protocol ordering + friction block
     // -----------------------------------------------------------------------
 
-    "tool.execute.before": async (input: { tool: string }) => {
+    "tool.execute.before": async (input: { tool: string; args?: Record<string, unknown> }) => {
       if (!["write", "edit", "apply_patch"].includes(input.tool)) return
+
+      // HORIZON ORCHESTRATION EXEMPTION:
+      // If the active agent is "horizon" and writing to the Horizon persistence
+      // directory (~/.parallax/horizon/...), allow the write without protocol
+      // enforcement. Horizon's orchestration writes (plan.json, state.json,
+      // research files, skills, decisions) are autonomous operations that
+      // should not require Parallax protocol steps.
+      const horizonDir = join(".parallax", "horizon")
+      const filePath = input.args?.filePath as string | undefined
+      if (
+        currentAgentName === "horizon" &&
+        filePath &&
+        filePath.includes(horizonDir)
+      ) {
+        return
+      }
 
       // Read from disk: OpenCode loads plugin in separate execution contexts
       // for tools vs hooks. In-memory Maps are NOT shared across contexts.
@@ -954,6 +1749,80 @@ export default {
               "after writes. Flag deferred items.",
           )
         }
+        if (m.mode === "horizon") {
+          sys.push(
+            "\n[CORE BEHAVIOR]\n" +
+            "- You plan, research, execute, self-test, and self-iterate until done\n" +
+            "- You NEVER ask the user mid-execution questions. You research and decide.\n" +
+            "- You document all auto-decisions in decisions.jsonl\n" +
+            "- You dispatch sub-agents for implementation work\n" +
+            "- You self-evaluate every sub-agent output across 6 dimensions\n" +
+            "- You run automated tests after every sub-agent\n" +
+            "- You re-plan and retry when verification fails (max 3 cycles)\n" +
+            "- You report progress through client.app.log()\n\n" +
+            "[WORKFLOW]\n" +
+            "1. RESEARCH -- web search + codebase analysis before any editing\n" +
+            "2. PLAN -- decompose into milestones + features in plan.json\n" +
+            "3. EXECUTE -- dispatch sub-agents, test, evaluate, iterate\n" +
+            "4. AUDIT -- final parallax_debug pass on all work\n\n" +
+            "[HORIZON TOOLS]\n" +
+            "- horizon_init_session -- Initialize a new session\n" +
+            "- horizon_write_plan -- Write/update plan.json\n" +
+            "- horizon_read_plan -- Read current plan\n" +
+            "- horizon_update_feature -- Update a feature's status\n" +
+            "- horizon_update_milestone -- Update a milestone's status\n" +
+            "- horizon_write_state -- Write orchestration state\n" +
+            "- horizon_read_state -- Read orchestration state\n" +
+            "- horizon_append_decision -- Log an autonomous decision\n" +
+            "- horizon_read_decisions -- Read decision log\n" +
+            "- horizon_write_research -- Write research findings\n" +
+            "- horizon_read_research -- Read research findings\n" +
+            "- horizon_create_skill -- Create session-scoped skill\n" +
+            "- horizon_list_skills -- List session-scoped skills\n" +
+            "- horizon_save_trace -- Archive sub-agent trace\n" +
+            "- horizon_list_sessions -- List all Horizon sessions\n" +
+            "- horizon_evaluate_subagent -- 6-dimension weighted self-check (pass >= 75%)\n" +
+            "- horizon_session_status -- Comprehensive session status\n" +
+            "- horizon_config -- Read/write Horizon config\n\n" +
+            "[OTHER TOOLS]\n" +
+            "- task() to dispatch sub-agents\n" +
+            "- webfetch/browser for research\n" +
+            "- parallax_plan/build/debug for complex sub-agent configuration\n" +
+            "- parallax_verify for automated verification\n" +
+            "- todowrite for plan tracking\n\n" +
+            "[PERSISTENCE]\n" +
+            "All state at ~/.parallax/horizon/sessions/<id>/",
+          )
+
+          // SESSION RESTART RECOVERY: detect existing sessions for resume
+          const hSessions = horizon.listHorizonSessions()
+          const activeSessions = hSessions.filter(
+            (s) => s.meta.status === "executing" || s.meta.status === "planning",
+          )
+          if (activeSessions.length > 0) {
+            const latest = activeSessions[activeSessions.length - 1]
+            const hPlan = horizon.readHorizonPlan(latest.id)
+            const hState = horizon.readHorizonState(latest.id)
+            if (hPlan && hState) {
+              const pct = hPlan.stats.totalFeatures > 0
+                ? Math.round((hPlan.stats.completedFeatures / hPlan.stats.totalFeatures) * 100)
+                : 0
+              sys.push(
+                "\n## SESSION RESTART DETECTED\n\n" +
+                `An existing session was found. You may resume it:\n\n` +
+                `Session: ${latest.id}\n` +
+                `Goal: ${hPlan.goal.slice(0, 120)}\n` +
+                `Status: ${hPlan.status}\n` +
+                `Phase: ${hState.currentPhase}\n` +
+                `Progress: ${hPlan.stats.completedFeatures}/${hPlan.stats.totalFeatures} (${pct}%)\n` +
+                `Milestones: ${hPlan.milestones.length}\n` +
+                `Autonomy: ${hPlan.autonomyLevel}\n\n` +
+                `Use horizon_read_plan and horizon_read_state to inspect, ` +
+                `then horizon_write_state to set the active phase and continue.`,
+              )
+            }
+          }
+        }
       }
 
       // Inject friction state
@@ -987,14 +1856,30 @@ export default {
       }
 
       const ctx = output.context || (output.context = [])
-      ctx.push(
-        `## PARALLAX SESSION STATE\n` +
-          `- Mode: ${m.mode}\n` +
-          `- Ambiguity: ${p.ambiguityDone}, Invariants: ${p.invariantsDone}, ` +
-          `Gate: ${p.gateDone}\n` +
-          `- Friction: ${s.successes} ok / ${s.trials} trials, ` +
+      const lines = [
+        `## PARALLAX SESSION STATE`,
+        `- Mode: ${m.mode}`,
+        `- Ambiguity: ${p.ambiguityDone}, Invariants: ${p.invariantsDone}, ` +
+          `Gate: ${p.gateDone}`,
+        `- Friction: ${s.successes} ok / ${s.trials} trials, ` +
           `Retries: ${s.retriesLeft}`,
-      )
+      ]
+
+      // Include Horizon session context when in horizon mode
+      if (m.mode === "horizon") {
+        const hPlan = horizon.readHorizonPlan(sid)
+        const hState = horizon.readHorizonState(sid)
+        if (hPlan) {
+          lines.push(
+            `- Horizon goal: ${hPlan.goal.slice(0, 120)}`,
+            `- Horizon progress: ${hPlan.stats.completedFeatures}/${hPlan.stats.totalFeatures}`,
+            `- Horizon phase: ${hState ? hState.currentPhase : "unknown"}`,
+            `- Horizon autonomy: ${hPlan.autonomyLevel}`,
+          )
+        }
+      }
+
+      ctx.push(lines.join("\n"))
     },
   }
 }

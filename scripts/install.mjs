@@ -28,11 +28,15 @@ function resolvePluginSrc() {
 }
 const FILES = {
   plugin: { src: resolvePluginSrc(), dest: join(CONFIG, "plugins", "parallax-engine.js") },
-  agent:  { src: join(ROOT, "agents", "parallax.md"),           dest: join(CONFIG, "agents", "parallax.md") },
+  agents: [
+    { src: join(ROOT, "agents", "parallax.md"), dest: join(CONFIG, "agents", "parallax.md") },
+    { src: join(ROOT, "agents", "horizon.md"),  dest: join(CONFIG, "agents", "horizon.md") },
+  ],
   skills: [
-    { name: "parallax",     src: join(ROOT, "skills", "parallax"),         dest: join(CONFIG, "skills", "parallax") },
-    { name: "parallax-plan",  src: join(ROOT, "skills", "parallax-plan"),  dest: join(CONFIG, "skills", "parallax-plan") },
-    { name: "parallax-debug", src: join(ROOT, "skills", "parallax-debug"), dest: join(CONFIG, "skills", "parallax-debug") },
+    { name: "parallax",       src: join(ROOT, "skills", "parallax"),         dest: join(CONFIG, "skills", "parallax") },
+    { name: "parallax-plan",  src: join(ROOT, "skills", "parallax-plan"),    dest: join(CONFIG, "skills", "parallax-plan") },
+    { name: "parallax-debug", src: join(ROOT, "skills", "parallax-debug"),   dest: join(CONFIG, "skills", "parallax-debug") },
+    { name: "horizon",        src: join(ROOT, "skills", "horizon"),          dest: join(CONFIG, "skills", "horizon") },
   ],
 }
 
@@ -69,8 +73,10 @@ function copyFiles() {
   log(`copying plugin  -> ${FILES.plugin.dest}`)
   copyFileSync(FILES.plugin.src, FILES.plugin.dest)
 
-  log(`copying agent   -> ${FILES.agent.dest}`)
-  copyFileSync(FILES.agent.src, FILES.agent.dest)
+  for (const ag of FILES.agents) {
+    log(`copying agent   -> ${ag.dest}`)
+    copyFileSync(ag.src, ag.dest)
+  }
 
   for (const sk of FILES.skills) {
     log(`copying skill   -> ${sk.dest}`)
