@@ -90,7 +90,7 @@ function copyFiles() {
 
 function registerPlugin() {
   const configPath = join(CONFIG, "opencode.json")
-  const pluginEntry = "./plugins/parallax-engine.js"
+  const pluginEntry = "parallax-opencode"
 
   if (!existsSync(configPath)) {
     log("no opencode.json found -- skipping registration")
@@ -105,9 +105,9 @@ function registerPlugin() {
       config.plugin = []
     }
 
-    // Check if already registered (by name or path)
+    // Check if already registered (by name, old path, or old name)
     const alreadyRegistered = config.plugin.some(
-      (p) => p === pluginEntry || p === "parallax-engine" || p === "parallax-opencode",
+      (p) => p === pluginEntry || p === "parallax-engine" || p === "./plugins/parallax-engine.js",
     )
 
     if (alreadyRegistered) {
@@ -117,15 +117,30 @@ function registerPlugin() {
 
     config.plugin.push(pluginEntry)
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf8")
-    log("registered parallax-engine plugin in opencode.json")
+    log("registered parallax-opencode plugin in opencode.json")
   } catch (err) {
     log(`failed to register plugin: ${String(err && err.message ? err.message : err)}`)
   }
 }
 
+function ensureNpmPackage() {
+  const pkgPath = join(CONFIG, "node_modules", "parallax-opencode")
+  if (existsSync(pkgPath)) {
+    log("parallax-opencode already in node_modules")
+    return
+  }
+  log("installing parallax-opencode package in node_modules...")
+  execSync("npm install parallax-opencode@latest --ignore-scripts", {
+    cwd: CONFIG,
+    stdio: "pipe",
+  })
+  log("parallax-opencode installed in node_modules")
+}
+
 function main() {
   log(`config directory: ${CONFIG}`)
   copyFiles()
+  ensureNpmPackage()
   ensureDependency()
   registerPlugin()
   log("done! restart OpenCode to load Parallax Engine.")
