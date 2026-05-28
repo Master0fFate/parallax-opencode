@@ -256,6 +256,45 @@ export interface HorizonConfig {
 // Config types
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Hyperplan types -- adversarial plan hardening
+// ---------------------------------------------------------------------------
+
+export type HyperplanMode = "generate" | "synthesize"
+
+export interface HyperplanAngle {
+  id: string
+  name: string
+  attackVector: string
+  instruction: string
+  focusAreas: string[]
+  severity: "critical" | "major" | "minor"
+}
+
+export interface HyperplanCritique {
+  angleId: string
+  angleName: string
+  findings: string
+  severity: "critical" | "major" | "minor"
+  affectedAreas: string[]
+}
+
+export interface HyperplanResult {
+  complexity: "trivial" | "moderate" | "complex"
+  reason: string
+  skipped: boolean
+  angles: HyperplanAngle[]
+  prompts: Array<{ angleId: string; prompt: string }>
+}
+
+export interface HyperplanSynthesis {
+  confidence: number
+  survivingInsights: string[]
+  rejectedCritiques: Array<{ critique: string; reason: string }>
+  hardenedPlan: string
+  summary: string
+}
+
 export interface ParallaxConfig {
   strictness?: "strict" | "standard" | "relaxed"
   minScore?: number

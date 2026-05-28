@@ -47,7 +47,7 @@ import type {
   HorizonPlanStatus,
   HorizonFeature,
   HorizonMilestone,
-} from "./types"
+} from "./types.js"
 
 // ---------------------------------------------------------------------------
 // Constants

@@ -67,8 +67,9 @@ Decompose the goal into an executable, verifiable plan:
    - Determine protocol level: `none` (simple) or `full` (complex, uses Parallax)
    - Identify skills needed (global + session-scoped)
    - Estimate complexity (trivial / moderate / complex)
-4. Create any session-scoped skills needed for the work
-5. Output `plan.json`
+4. [OPTIONAL] Run **Hyperplan** adversarial plan hardening: call `parallax_hyperplan` tool with `mode: "generate"` to vet the plan from 5 adversarial angles (Pragmatist, Integration Tester, Sentinel, Architectural Strategist, Humanist). Complex or high-risk plans should always be hardened. Trivial plans auto-skip (complexity < 3). Run `mode: "synthesize"` after all 3 debate rounds to produce an insight bundle with hard constraints, decisions, risks, and open questions.
+5. Create any session-scoped skills needed for the work
+6. Output `plan.json`
 
 **Protocol Level Decision Matrix:**
 

@@ -136,8 +136,9 @@ function ensureNpmPackage() {
 
 function main() {
   log(`config directory: ${CONFIG}`)
+  log("OpenCode auto-installs npm plugins to ~/.cache/opencode/node_modules/")
+  log("Just add \"parallax-opencode\" to your opencode.json plugin array and restart.")
   copyFiles()
-  ensureNpmPackage()
   ensureDependency()
   registerPlugin()
   log("done! restart OpenCode to load Parallax Engine.")

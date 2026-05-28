@@ -66,6 +66,63 @@ Before committing any change, verify:
 - [ ] Security / obvious risks addressed?
 - [ ] Friction loop passed (if applicable)?
 
+## HYPERPLAN: ADVERSARIAL PLAN HARDENING (Optional)
+
+Before executing a complex plan, you may harden it using the Hyperplan adversarial debate system.
+
+### When to Use
+
+- **Complex plans** (multi-file, cross-module, high-risk) -- ALWAYS hyperplan
+- **Moderate plans** (new feature with known patterns) -- RECOMMENDED
+- **Trivial plans** (typo fix, single-file config change) -- SKIP (auto-detected)
+
+### The 3-Round Debate
+
+**Round 1 -- Independent Analysis (parallel)**
+Dispatch 5 adversarial critics simultaneously via task():
+- Pragmatist (major): Is this practical? Does it ship? Scope vs value?
+- Integration Tester (critical): Does this integrate cleanly? What breaks?
+- Sentinel (critical): What is the worst case? Security, failure, edge cases?
+- Architectural Strategist (major): Does this fit the architecture? Coupling?
+- Humanist (major): Can a human understand and maintain this?
+
+Each critic outputs JSON with findings, severity (critical/major/minor), affected areas, and selfCritique acknowledging their own blind spots.
+
+**Round 2 -- Cross-Attack**
+Each critic receives ALL other critics' findings and attacks every point:
+- Must output DEFEND (stands), REFINE (revise), or CONCEDE (admit wrong) per point
+- Default position: REJECT -- only concede when evidence forces it
+- Each attack includes an alternative suggestion
+
+**Round 3 -- Defense & Refinement**
+Each critic receives ONLY attacks against their own findings:
+- DEFEND: Concrete evidence required (no "I believe")
+- REFINE: Produce a stronger version incorporating valid criticism
+- CONCEDE: State what (if anything) survives
+
+### Insight Bundle Synthesis
+
+After all 3 rounds, synthesize an insight bundle with 4 categories:
+
+1. **Hard Constraints** -- Non-negotiable findings (must-fix)
+2. **Decisions Made** -- Trade-offs explicitly accepted
+3. **Risks & Mitigations** -- Identified risks with mitigation strategies
+4. **Open Questions** -- Items needing more information
+
+Also tracks:
+- **Adversarial Provenance**: How many findings survived from each angle
+- **Confidence Score**: Derived from unresolved critical/major/minor findings, adjusted for conceded items in Round 3
+
+### Usage via Plugin
+
+Call `parallax_hyperplan` tool with the plugin:
+- `mode: "generate"` with `round: "analysis"` -- Independent analysis prompts
+- `mode: "generate"` with `round: "cross-attack"` -- Cross-attack prompts
+- `mode: "generate"` with `round: "defense"` -- Defense prompts
+- `mode: "synthesize"` -- Produce insight bundle
+
+The tool generates structured prompts. You dispatch sub-agents in parallel via task() using those prompts.
+
 ## RED LINES (Stop and Flag)
 
 - Unclear state ownership

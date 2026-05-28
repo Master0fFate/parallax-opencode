@@ -23,17 +23,18 @@ import type {
   ProtocolState,
   ParallaxConfig,
   HorizonAutonomyLevel,
-} from "./types"
-import { detectProject, runVerify } from "./detect"
+} from "./types.js"
+import { detectProject, runVerify } from "./detect.js"
 import {
   initTrace,
   addPhase,
   addWrite,
   exportTrace,
   getTrace,
-} from "./trace"
-import { computeCoherenceScore } from "./score"
-import * as horizon from "./horizon"
+} from "./trace.js"
+import { computeCoherenceScore } from "./score.js"
+import * as horizon from "./horizon.js"
+import * as hyperplan from "./hyperplan.js"
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -1296,6 +1297,214 @@ export default {
         },
       }),
 
+      parallax_hyperplan: tool({
+              description: "Multi-round adversarial plan hardening. Supports 3 rounds of critique: " +
+                "'analysis' (Round 1 -- independent critiques from N angles), " +
+                "'cross-attack' (Round 2 -- each critic attacks others' findings), " +
+                "'defense' (Round 3 -- each critic defends/refines/concedes), " +
+                "and 'synthesize' (insight bundle with 4 categories: hard constraints, " +
+                "decisions, risks, open questions). Built-in complexity detection " +
+                "skips trivial plans automatically.",
+              args: {
+                mode: tool.schema.string().describe("'generate' to create adversarial prompts (use round param to select " +
+                  "analysis/cross-attack/defense); 'synthesize' to combine critiques " +
+                  "into a structured insight bundle with hard constraints, decisions, " +
+                  "risks, and open questions."),
+                round: tool.schema.string().optional().describe("For 'generate' mode: 'analysis' (Round 1 -- default), " +
+                  "'cross-attack' (Round 2 -- needs 'findings'), " +
+                  "'defense' (Round 3 -- needs 'attacks')."),
+                plan: tool.schema.string().describe("The plan as a JSON string or markdown description. Analyzed for " +
+                  "complexity signals to determine if hyperplan is warranted."),
+                angles: tool.schema.string().optional().describe("Optional JSON array of angle IDs to use. Default angles: " +
+                  "[\"pragmatist\", \"integration\", \"sentinel\", \"architect\", \"humanist\"]. " +
+                  "For 'moderate' complexity plans, only critical-severity angles are used " +
+                  "unless custom angles specified."),
+                force: tool.schema.boolean().optional().describe("Force hyperplan execution even for trivial plans (default: false). " +
+                  "Trivial plans automatically skip to avoid wasted compute."),
+                critiques: tool.schema.string().optional().describe("For 'synthesize' mode or cross-attack round. JSON array of critique " +
+                  "objects returned by sub-agents. Each critique must include angleId, " +
+                  "angleName, findings, severity, affectedAreas."),
+                findings: tool.schema.string().optional().describe("For 'cross-attack' round. JSON array of all Round 1 findings. " +
+                  "Each entry: { angleId, angleName, findings }. " +
+                  "Each critic attacks the other critics' findings."),
+                attacks: tool.schema.string().optional().describe("For 'defense' round. JSON object mapping angleId to its attacks. " +
+                  "Each attack: { targetFinding, attackerName, attack, severity }. " +
+                  "Each critic defends/refines/concedes their own attacked findings."),
+                context: tool.schema.string().optional().describe("Optional additional context about the project or codebase. Injected " +
+                  "into sub-agent prompts for more targeted critiques."),
+              },
+              async execute(args) {
+                if (args.mode === "generate") {
+                  const round = args.round || "analysis";
+                  // Parse optional custom angles
+                  let customAngles;
+                  if (args.angles) {
+                    try {
+                      customAngles = JSON.parse(args.angles);
+                      if (!Array.isArray(customAngles)) {
+                        return "[hyperplan] ERROR: 'angles' must be a JSON array of string IDs.";
+                      }
+                    }
+                    catch {
+                      return "[hyperplan] ERROR: Invalid JSON in 'angles' parameter.";
+                    }
+                  }
+                  // ROUND 1: Independent analysis prompts
+                  if (round === "analysis") {
+                    const result = hyperplan.generateHyperplan(args.plan, {
+                      customAngles,
+                      force: args.force === true,
+                      extraContext: args.context,
+                    });
+                    if (result.skipped) {
+                      const prefix = result.complexity === "trivial"
+                        ? "TRIVIAL PLAN -- SKIPPING"
+                        : "NOT WARRANTED -- SKIPPING";
+                      return (`[hyperplan] ${prefix}\n` +
+                        `Reason: ${result.reason}\n` +
+                        `Complexity: ${result.complexity} (score: ${hyperplan.assessComplexity(args.plan).score})\n` +
+                        `\n` +
+                        `To force hyperplan on this plan, call again with force=true.`);
+                    }
+                    const promptsText = result.prompts
+                      .map((p, i) => `=== PROMPT ${i + 1}: ${result.angles[i].name} [${result.angles[i].severity.toUpperCase()}] ===\n` +
+                      `Angle ID: ${p.angleId}\n` +
+                      `Attack Vector: ${result.angles[i].attackVector}\n\n` +
+                      p.prompt)
+                      .join("\n\n");
+                    return (`[hyperplan] ROUND 1: ANALYSIS\n` +
+                      `Complexity: ${result.complexity.toUpperCase()} (score: ${hyperplan.assessComplexity(args.plan).score})\n` +
+                      `Angles: ${result.angles.length} perspectives\n` +
+                      `Reason: ${result.reason}\n\n` +
+                      `## DISPATCH INSTRUCTIONS\n` +
+                      `Dispatch ${result.angles.length} sub-agents in PARALLEL via task() -- one per prompt below.\n` +
+                      `Give each sub-agent its prompt. Collect all critiques as JSON.\n\n` +
+                      promptsText + "\n\n" +
+                      `## AFTER ROUND 1\n` +
+                      `Collect all critiques, then proceed to Round 2 (cross-attack) or synthesize:\n` +
+                      `  Round 2: parallax_hyperplan({ mode: "generate", round: "cross-attack", plan: "...", findings: "<all findings JSON>" })\n` +
+                      `  Synthesize: parallax_hyperplan({ mode: "synthesize", plan: "...", critiques: "<all critiques JSON>" })`);
+                  }
+                  // ROUND 2: Cross-attack prompts
+                  if (round === "cross-attack") {
+                    if (!args.findings) {
+                      return ("[hyperplan] ERROR: 'findings' parameter is required for 'cross-attack' round. " +
+                        "Provide a JSON array of Round 1 findings from all critics.");
+                    }
+                    let parsedFindings;
+                    try {
+                      parsedFindings = JSON.parse(args.findings);
+                      if (!Array.isArray(parsedFindings)) {
+                        return "[hyperplan] ERROR: 'findings' must be a JSON array.";
+                      }
+                    }
+                    catch {
+                      return "[hyperplan] ERROR: Invalid JSON in 'findings' parameter.";
+                    }
+                    // Use the existing generate to get angles, then generate cross-attack prompts
+                    const genResult = hyperplan.generateHyperplan(args.plan, {
+                      customAngles,
+                      force: args.force === true,
+                      extraContext: args.context,
+                    });
+                    const angles = genResult.angles;
+                    if (angles.length === 0) {
+                      return "[hyperplan] No angles available for cross-attack. Run Round 1 first.";
+                    }
+                    const crossAttacks = hyperplan.generateAllCrossAttacks(angles, parsedFindings);
+                    const promptsText = crossAttacks
+                      .map((ca, i) => `=== CROSS-ATTACK PROMPT ${i + 1}: ${angles[i].name} ===\n` +
+                      `Angle ID: ${ca.angleId}\n\n` +
+                      ca.prompt)
+                      .join("\n\n");
+                    return (`[hyperplan] ROUND 2: CROSS-ATTACK\n` +
+                      `Angles: ${angles.length} critics\n` +
+                      `Findings under attack: ${parsedFindings.length}\n\n` +
+                      `## DISPATCH INSTRUCTIONS\n` +
+                      `Dispatch ${angles.length} sub-agents in PARALLEL via task() -- one per prompt below.\n` +
+                      `Each critic receives ALL other critics' findings and must attack every one.\n\n` +
+                      promptsText + "\n\n" +
+                      `## AFTER ROUND 2\n` +
+                      `Collect all cross-attacks, then proceed to Round 3 (defense):\n` +
+                      `  parallax_hyperplan({ mode: "generate", round: "defense", plan: "...", attacks: "<attacks_by_angle JSON>" })`);
+                  }
+                  // ROUND 3: Defense/refinement prompts
+                  if (round === "defense") {
+                    if (!args.attacks) {
+                      return ("[hyperplan] ERROR: 'attacks' parameter is required for 'defense' round. " +
+                        "Provide a JSON object mapping each angleId to its attacks array.");
+                    }
+                    let parsedAttacks;
+                    try {
+                      parsedAttacks = JSON.parse(args.attacks);
+                      if (typeof parsedAttacks !== "object" || Array.isArray(parsedAttacks)) {
+                        return "[hyperplan] ERROR: 'attacks' must be a JSON object mapping angleId to attack arrays.";
+                      }
+                    }
+                    catch {
+                      return "[hyperplan] ERROR: Invalid JSON in 'attacks' parameter.";
+                    }
+                    const genResult = hyperplan.generateHyperplan(args.plan, {
+                      customAngles,
+                      force: args.force === true,
+                      extraContext: args.context,
+                    });
+                    const angleMap = new Map(genResult.angles.map((a) => [a.id, a]));
+                    const defensePrompts = [];
+                    for (const [angleId, attacks] of Object.entries(parsedAttacks)) {
+                      const angle = angleMap.get(angleId);
+                      if (!angle)
+                        continue;
+                      const prompt = hyperplan.generateDefensePrompt(angle, attacks as Array<{ targetFinding: string; attackerName: string; attack: string; severity: string }>);
+                      defensePrompts.push({ angleId, prompt });
+                    }
+                    if (defensePrompts.length === 0) {
+                      return "[hyperplan] No defense prompts generated. Check that angle IDs match.";
+                    }
+                    const promptsText = defensePrompts
+                      .map((dp, i) => `=== DEFENSE PROMPT ${i + 1}: ${genResult.angles.find((a) => a.id === dp.angleId)?.name || dp.angleId} ===\n\n` +
+                      dp.prompt)
+                      .join("\n\n");
+                    return (`[hyperplan] ROUND 3: DEFENSE & REFINEMENT\n` +
+                      `Critics defending: ${defensePrompts.length}\n\n` +
+                      `## DISPATCH INSTRUCTIONS\n` +
+                      `Dispatch ${defensePrompts.length} sub-agents in PARALLEL via task().\n` +
+                      `Each critic receives ONLY the attacks against their own findings.\n` +
+                      `They must DEFEND, REFINE, or CONCEDE each point.\n\n` +
+                      promptsText + "\n\n" +
+                      `## AFTER ROUND 3\n` +
+                      `Collect all defenses, then produce the final insight bundle:\n` +
+                      `  parallax_hyperplan({ mode: "synthesize", plan: "...", critiques: "<all critiques JSON>" })`);
+                  }
+                  return (`[hyperplan] ERROR: Unknown round "${round}". ` +
+                    `Valid rounds: "analysis" (default), "cross-attack", "defense".`);
+                }
+                if (args.mode === "synthesize") {
+                  if (!args.critiques) {
+                    return ("[hyperplan] ERROR: 'critiques' parameter is required for 'synthesize' mode. " +
+                      "Provide a JSON array of critique objects from sub-agents.");
+                  }
+                  let critiques;
+                  try {
+                    critiques = JSON.parse(args.critiques);
+                    if (!Array.isArray(critiques)) {
+                      return "[hyperplan] ERROR: 'critiques' must be a JSON array.";
+                    }
+                  }
+                  catch {
+                    return "[hyperplan] ERROR: Invalid JSON in 'critiques' parameter.";
+                  }
+                  // Use enhanced insight bundle synthesis (4-category output)
+                  const insightBundle = hyperplan.synthesizeInsightBundle(args.plan, critiques);
+                  return (`[hyperplan] INSIGHT BUNDLE SYNTHESIS\n` +
+                    `Critiques analyzed: ${critiques.length}\n\n` +
+                    insightBundle);
+                }
+                return (`[hyperplan] ERROR: Unknown mode "${args.mode}". ` +
+                  `Use "generate" (for analysis/cross-attack/defense rounds) or "synthesize" ` +
+                  `(for insight bundle generation).`);
+              },
+            }),
       // TRACE EXPORT -- export current session trace to file
       parallax_trace_export: tool({
         description:

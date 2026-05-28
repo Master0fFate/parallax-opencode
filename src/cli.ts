@@ -24,7 +24,7 @@ import {
   listTraceFiles,
   loadTrace,
   exportTrace,
-} from "./trace"
+} from "./trace.js"
 import {
   computeCoherenceScore,
   formatScoreBreakdown,
@@ -35,7 +35,7 @@ import {
   computeWeeklyReport,
   detectFailurePatterns,
   computePerProjectStats,
-} from "./score"
+} from "./score.js"
 
 // ---------------------------------------------------------------------------
 // Constants

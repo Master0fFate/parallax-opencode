@@ -21,7 +21,7 @@ import type {
   WriteRecord,
   TraceMetrics,
   ProjectType,
-} from "./types"
+} from "./types.js"
 
 // ---------------------------------------------------------------------------
 // Constants

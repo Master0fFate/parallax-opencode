@@ -1,15 +1,27 @@
 {
   "name": "parallax-opencode",
-  "version": "0.3.16",
+  "version": "0.5.0",
   "description": "PARALLAX ENGINE plugin for OpenCode -- protocol enforcement, friction-loop verification, mode switching (plan/build/debug/horizon), trace recording, coherence scoring, CI gate, PR-ready trace artifacts, and autonomous long-horizon supervision",
   "type": "module",
   "main": "./dist/plugin.js",
   "types": "./dist/plugin.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/plugin.d.ts",
       "import": "./dist/plugin.js",
-      "types": "./dist/plugin.d.ts"
-    }
+      "require": "./dist/plugin.js"
+    },
+    "./server": {
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js",
+      "require": "./dist/plugin.js"
+    },
+    "./dist/hyperplan.js": {
+      "types": "./dist/hyperplan.d.ts",
+      "import": "./dist/hyperplan.js",
+      "require": "./dist/hyperplan.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",

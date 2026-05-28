@@ -16,7 +16,7 @@
 
 import { join } from "path"
 import { existsSync, appendFileSync, readFileSync, mkdirSync } from "fs"
-import type { ParallaxTrace, PhaseName, ScoreBreakdown, ScoreEntry } from "./types"
+import type { ParallaxTrace, PhaseName, ScoreBreakdown, ScoreEntry } from "./types.js"
 
 // ---------------------------------------------------------------------------
 // Constants

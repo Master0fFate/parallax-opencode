@@ -30,6 +30,18 @@ Output your ambiguity assessment BEFORE anything else:
 
 CONSEQUENCE: Plugin will block writes if this step is skipped.
 
+### STEP 1.5: HYPERPLAN [OPTIONAL - PLAN HARDENING]
+For non-trivial plans, harden them with adversarial critique BEFORE writing invariants.
+Hyperplan spawns 5 hostile agents that attack your plan from orthogonal angles,
+surfacing hidden risks, blind assumptions, and edge cases before they become bugs:
+
+1. Assess plan complexity using `parallax_hyperplan(mode: "generate", plan: "...")`
+2. If complexity is MODERATE or COMPLEX, dispatch sub-agents in parallel via `task()`
+3. Collect critiques and synthesize using `parallax_hyperplan(mode: "synthesize", ...)`
+4. Revise plan based on surviving insights before proceeding to invariants
+
+Trivial plans are automatically skipped. Use force=true to override.
+
 ### STEP 2: 4 INVARIANTS [REQUIRED - BEFORE ANY CODE]
 State each answer explicitly:
 | Question | Your answer |

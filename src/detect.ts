@@ -9,7 +9,7 @@
  */
 
 import { existsSync, statSync } from "fs"
-import type { ProjectType, VerifyResult } from "./types"
+import type { ProjectType, VerifyResult } from "./types.js"
 
 /**
  * Detect the project type based on files present in the current directory.
