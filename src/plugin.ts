@@ -10,7 +10,7 @@
  * Copyright (c) 2026 Master0fFate
  */
 
-import { type PluginModule, tool } from "@opencode-ai/plugin"
+import { type Plugin, tool } from "@opencode-ai/plugin"
 import { readFileSync, writeFileSync, existsSync } from "fs"
 import { homedir } from "os"
 import { join } from "path"
@@ -294,9 +294,7 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null
 // Plugin export
 // ---------------------------------------------------------------------------
 
-export default {
-  id: "parallax-engine",
-  server: async ({ client }) => {
+export const plugin: Plugin = async ({ client }) => {
     return {
     // -----------------------------------------------------------------------
     // Custom tools
@@ -2102,4 +2100,5 @@ export default {
     },
   }
 }
-} satisfies PluginModule
+
+export default plugin
