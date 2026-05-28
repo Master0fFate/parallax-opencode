@@ -403,6 +403,62 @@ parallax_plugin/
 
 ---
 
+## Troubleshooting
+
+### Plugin not loading / tools not showing
+
+OpenCode resolves plugins via the `exports` field in `package.json`. The plugin requires `"./server"` as an export entry:
+
+```json
+"exports": {
+  ".": { ... },
+  "./server": { ... }
+}
+```
+
+If you see "plugin not found" or tools are missing, try:
+
+```bash
+# Clear OpenCode's Bun cache and reinstall
+rm -rf ~/.cache/opencode/packages/parallax-opencode*
+npx parallax-opencode@latest
+```
+
+### "failed to list files" / "failed to load sessions" errors
+
+These errors come from **OpenCode core**, not this plugin. They typically mean:
+
+- The project directory has permission issues
+- A symlink in the project tree is broken
+- The `.parallax/horizon/` directory is missing or corrupt
+
+**Fix:**
+
+```bash
+# Delete and let the plugin recreate it
+rm -rf ~/.parallax/horizon
+```
+
+The plugin handles missing directories gracefully -- it creates them on first use.
+
+### Protocol state lost between sessions
+
+Protocol state is persisted to `.parallax/state.json` on every checkin. If state appears lost:
+
+1. Check that `.parallax/state.json` exists and is valid JSON
+2. Ensure the plugin process has write access to the project directory
+3. Run `parallax_trace_view` to see what was recorded
+
+### Horizon sessions not appearing
+
+Horizon stores sessions in `~/.parallax/horizon/sessions/<uuid>/`. The session index is at `~/.parallax/horizon/index.json`. If sessions disappear:
+
+1. Check if `index.json` is valid JSON (the plugin auto-recovers from corrupt JSON)
+2. Ensure `~/.parallax/horizon/sessions/` directory exists
+3. Run `horizon_list_sessions` to see what the plugin detects
+
+---
+
 ## License
 
 MIT (c) [@Master0fFate](https://github.com/Master0fFate)

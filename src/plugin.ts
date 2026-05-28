@@ -131,7 +131,9 @@ function flushState(): void {
   try {
     const s = getFriction()
     const m = getMode()
-    const p = getProtocol()
+    // Read from disk: OpenCode loads plugin in separate execution contexts
+    // for tools vs hooks. In-memory Maps are NOT shared across contexts.
+    const p = readProtocolFromDisk() || getProtocol()
     const trace = getTrace(sessionId())
     const state = {
       sessionId: "current",
@@ -247,6 +249,24 @@ function loadSkill(name: string): string | null {
     skillCache[name] = null
   }
   return skillCache[name]
+}
+
+// ---------------------------------------------------------------------------
+// Horizon sessions cache (avoid disk read on every system prompt transform)
+// ---------------------------------------------------------------------------
+
+let horizonSessionsCache: ReturnType<typeof horizon.listHorizonSessions> | null = null
+let horizonSessionsCacheTime = 0
+const HORIZON_SESSIONS_CACHE_TTL_MS = 5000
+
+function getCachedHorizonSessions(): ReturnType<typeof horizon.listHorizonSessions> {
+  const now = Date.now()
+  if (horizonSessionsCache && now - horizonSessionsCacheTime < HORIZON_SESSIONS_CACHE_TTL_MS) {
+    return horizonSessionsCache
+  }
+  horizonSessionsCache = horizon.listHorizonSessions()
+  horizonSessionsCacheTime = now
+  return horizonSessionsCache
 }
 
 // ---------------------------------------------------------------------------
@@ -2012,7 +2032,7 @@ export const plugin: Plugin = async ({ client }) => {
           )
 
           // SESSION RESTART RECOVERY: detect existing sessions for resume
-          const hSessions = horizon.listHorizonSessions()
+          const hSessions = getCachedHorizonSessions()
           const activeSessions = hSessions.filter(
             (s) => s.meta.status === "executing" || s.meta.status === "planning",
           )
