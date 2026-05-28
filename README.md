@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/parallax-opencode)](https://www.npmjs.com/package/parallax-opencode)
-[![Tests](https://img.shields.io/badge/tests-56%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-99%20passing-brightgreen)]()
 
 ---
 
@@ -53,6 +53,7 @@ The Parallax agent follows a structured reasoning protocol before writing code. 
 | PLAN | `parallax_plan` | Vague requirements, before writing code |
 | BUILD | `parallax_build` | Executing, writing code (default) |
 | DEBUG | `parallax_debug` | Post-build quality and security audit |
+| HORIZON | `parallax_horizon` | Long-horizon autonomous supervision |
 
 ### Friction Loop
 
@@ -122,18 +123,98 @@ When Horizon encounters ambiguity, it autonomously:
 
 ---
 
+### HYPERPLAN -- Adversarial Plan Hardening
+
+The **Hyperplan** engine hardens plans against blind spots before execution begins. It runs a structured 3-round debate among 5 adversarial critics, then synthesizes the results into an insight bundle.
+
+The `parallax_hyperplan` plugin tool is the interface -- it generates prompts for each round and synthesizes the final result. The agent dispatches sub-agents in parallel via `task()`.
+
+#### When to Use
+
+| Complexity Score | Auto-Behavior | force=true |
+|---|---|---|
+| < 3 (trivial) | Skip -- no debate needed | Run anyway |
+| 3-5 (moderate) | 2 critical angles (Integration Tester + Sentinel) | All 5 angles |
+| > 5 (complex) | All 5 angles | All 5 angles |
+
+#### The 3-Round Debate
+
+| Round | What Happens | Agent Action |
+|---|---|---|
+| **1. Analysis** | Each critic independently analyzes the plan from their angle, producing findings with severity (critical/major/minor) and self-critique | Dispatch N sub-agents in parallel via `task()` |
+| **2. Cross-Attack** | Each critic attacks the other critics' findings. Must resolve to DEFEND / REFINE / CONCEDE | Dispatch N sub-agents with each others' findings |
+| **3. Defense** | Each critic defends/refines/concedes their own attacked findings. DEFEND requires evidence; REFINE produces stronger version; CONCEED states what survives | Dispatch N sub-agents with their attacks |
+| **Synthesize** | Engine aggregates all 3 rounds into an insight bundle with confidence scoring and provenance tracking | Single call to `parallax_hyperplan` |
+
+#### The 5 Adversarial Angles
+
+| Angle | ID | Severity | Attacks |
+|---|---|---|---|
+| **Pragmatist** | `pragmatist` | major | Feasibility, timeline, resourcing, real-world constraints |
+| **Integration Tester** | `integration` | critical | Interfaces, contracts, integration points, data flow |
+| **Sentinel** | `sentinel` | critical | Security, error handling, edge cases, failure modes |
+| **Architectural Strategist** | `architect` | major | Cohesion, coupling, scalability, technology choices |
+| **Humanist** | `humanist` | major | UX, DX, cognitive load, accessibility, onboarding |
+
+#### Confidence Scoring
+
+The insight bundle includes a quantitative confidence score (0-100) calibrated by adversarial severity:
+
+- Each **critical** finding: -15 points
+- Each **major** finding: -8 points
+- Each **minor** finding: -3 points
+- Round 3 concede adjustments: further reductions
+
+#### Usage Workflow
+
+```bash
+# ROUND 1: Generate analysis prompts
+parallax_hyperplan({ mode: "generate", plan: "...", force: true })
+
+# --> Dispatch N sub-agents with each prompt, collect critiques
+
+# ROUND 2: Generate cross-attack prompts
+parallax_hyperplan({ mode: "generate", round: "cross-attack", plan: "...", findings: "<all findings JSON>" })
+
+# --> Dispatch N sub-agents, collect responses
+
+# ROUND 3: Generate defense prompts
+parallax_hyperplan({ mode: "generate", round: "defense", plan: "...", attacks: "<attacks JSON>" })
+
+# --> Dispatch N sub-agents, collect defenses
+
+# SYNTHESIZE: Produce insight bundle
+parallax_hyperplan({ mode: "synthesize", plan: "...", critiques: "<all critiques JSON>" })
+```
+
+#### Insight Bundle Output
+
+The synthesized bundle contains 4 categories:
+
+| Category | Description |
+|---|---|
+| **Hard Constraints** | Non-negotiable requirements surfaced by critics |
+| **Decisions** | Trade-offs with supporting rationale |
+| **Risks** | Identified failure modes with severity and mitigation |
+| **Open Questions** | Gaps requiring further research |
+
+Each insight tracks its adversarial provenance (which angle raised it, how it survived cross-attack and defense rounds).
+
+---
+
 ## Plugin Tools
 
 These are called by the AI in OpenCode chat:
 
-### Parallax Tools (9)
+### Parallax Tools (11)
 
 | Tool | Purpose |
 |---|---|
 | `parallax_verify` | Run project verification |
 | `parallax_analyze` | Multi-perspective analysis on a topic |
 | `parallax_checkin` | Mark a protocol step complete |
-| `parallax_plan` / `_build` / `_debug` | Switch modes |
+| `parallax_plan` / `_build` / `_debug` / `_horizon` | Switch modes (plan, build, debug, horizon) |
+| `parallax_hyperplan` | Multi-round adversarial plan hardening (3-round debate + synthesis) |
 | `parallax_trace_export` | Export session trace to JSON |
 | `parallax_trace_pr_comment` | Generate trace as PR-ready markdown |
 | `parallax_trace_view` | Show full reasoning trace inline |
@@ -179,6 +260,11 @@ These are called by the AI in OpenCode chat:
 | `horizon_create_skill` | Create a session-scoped skill (SKILL.md + plan.json registration) |
 | `horizon_list_skills` | List session-scoped skills |
 
+#### Sub-Agent Evaluation
+| Tool | Purpose |
+|---|---|
+| `horizon_evaluate_subagent` | Score sub-agent output across 6 dimensions (0-100 each) |
+
 #### Trace Archiving
 | Tool | Purpose |
 |---|---|
@@ -217,9 +303,10 @@ Parallax Agent (system prompt)
   |     experimental.session.compacting     --> state preservation + trace export
   |     shell.env                   --> PARALLAX_MODE, PARALLAX_SESSION_ID in shell
   |
-  +-- Parallax custom tools (9)
+  +-- Parallax custom tools (11)
   |     parallax_verify, parallax_analyze, parallax_checkin,
-  |     parallax_plan / _build / _debug,
+  |     parallax_plan / _build / _debug / _horizon,
+  |     parallax_hyperplan,
   |     parallax_trace_export / _pr_comment / _view
   |
   +-- Horizon custom tools (18)
@@ -287,20 +374,22 @@ parallax_plugin/
     parallax.md                   # Parallax agent definition
     horizon.md                    # Horizon agent definition
   src/
-    plugin.ts                     # Plugin (~1900 lines, 27 tools)
-    types.ts                      # Shared types (includes Horizon types)
+    plugin.ts                     # Plugin (~2100 lines, 29 tools)
+    types.ts                      # Shared types (Horizon + Hyperplan types)
     horizon.ts                    # Horizon persistence module (512 lines)
+    hyperplan.ts                  # Hyperplan engine -- complexity detection, 3-round debate, insight bundle synthesis
     detect.ts                     # Project detection
     trace.ts                      # Trace recording + export
     score.ts                      # Coherence score + analytics
     cli.ts                        # CLI (CI only)
     tests/
+      hyperplan.test.ts           # 43 tests (complexity, prompts, cross-attack, defense, synthesis)
+      horizon.test.ts             # 26 tests
       trace.test.ts               # 6 tests
       protocol.test.ts            # 5 tests
       score.test.ts               # 5 tests
       detect.test.ts              # 7 tests
       friction.test.ts            # 7 tests
-      horizon.test.ts             # 26 tests
   dist-standalone/                # Bundled plugin (~76KB)
   skills/
     parallax/                     # Parallax protocol skills
