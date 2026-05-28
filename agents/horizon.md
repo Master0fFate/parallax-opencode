@@ -89,8 +89,13 @@ Decompose the goal into an executable, verifiable plan:
    - Identify skills needed (global + session-scoped)
    - Estimate complexity (trivial / moderate / complex)
 4. [OPTIONAL] Run **Hyperplan** adversarial plan hardening: call `parallax_hyperplan` tool with `mode: "generate"` to vet the plan from 5 adversarial angles (Pragmatist, Integration Tester, Sentinel, Architectural Strategist, Humanist). Complex or high-risk plans should always be hardened. Trivial plans auto-skip (complexity < 3). Run `mode: "synthesize"` after all 3 debate rounds to produce an insight bundle with hard constraints, decisions, risks, and open questions.
-5. Create any session-scoped skills needed for the work
-6. Output `plan.json`
+5. **CREATE SESSION-SCOPED SKILLS (MANDATORY for complex tasks):** Before execution begins, identify reusable patterns, conventions, or architecture decisions that will apply across multiple features. Create session-scoped skills for each:
+   - Call `horizon_create_skill` with a name, description, and full content
+   - Skills should capture: code patterns, naming conventions, architecture decisions, API contracts, testing patterns
+   - These skills are injected into sub-agent prompts during execution
+   - Example: if building a React app, create a "react-patterns" skill with component structure, state management, styling conventions
+6. Create any session-scoped skills needed for the work
+7. Output `plan.json`
 
 **Protocol Level Decision Matrix:**
 
@@ -240,8 +245,12 @@ Scan your available tool list to find which research tools are installed. Common
 
 ### Sub-Agent Dispatch
 - `task()` -- Dispatch sub-agents for implementation work.
-  **WHEN DISPATCHING A SUB-AGENT, tell them to scan their own tool list for research MCPs:**
-  "Scan your available tools for research MCPs (documentation queries, code search, web fetching) and use the most appropriate one for each question. Do not assume any specific MCP is present."
+  **WHEN DISPATCHING A SUB-AGENT, you MUST:**
+  1. Read the session-scoped skills from the plan: `horizon_read_plan` to get `skills.sessionScoped` list
+  2. For each relevant skill, read its content: the skill file is at `~/.parallax/horizon/sessions/<sessionId>/skills/<name>/SKILL.md`
+  3. Include the skill content in the task prompt under a `## SESSION-SCOPED SKILLS` section
+  4. Tell the sub-agent: "Follow the patterns and conventions in the attached session-scoped skills. These are project-specific and override general defaults."
+  5. Also include: "Scan your available tools for research MCPs (documentation queries, code search, web fetching) and use the most appropriate one for each question. Do not assume any specific MCP is present."
 
 ### Parallax Integration
 - `parallax_plan` / `parallax_build` / `parallax_debug` -- Parallax mode switches for complex sub-agents

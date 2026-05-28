@@ -2018,8 +2018,12 @@ export const plugin: Plugin = async ({ client }) => {
             "- Codebase tools (read/grep/glob) -- use for project files\n" +
             "Use the most targeted tool. Never assume any specific MCP is present.\n\n" +
             "[SUB-AGENT DISPATCH GUIDE]\n" +
-            "When you dispatch a sub-agent via task(), include this in the prompt:\n" +
-            "\"Scan your available tools for research MCPs (documentation queries, code search, web fetching) and use the most appropriate one for each question. Do not assume any specific MCP is present.\"\n\n" +
+            "When dispatching a sub-agent via task(), you MUST:\n" +
+            "1. Read the plan to get skills.sessionScoped list\n" +
+            "2. Read each skill from ~/.parallax/horizon/sessions/<sessionId>/skills/<name>/SKILL.md\n" +
+            "3. Include the skill content in the task prompt under a '## SESSION-SCOPED SKILLS' section\n" +
+            "4. Tell the sub-agent: 'Follow the patterns and conventions in the attached session-scoped skills. These are project-specific and override general defaults.'\n" +
+            "5. Also include: 'Scan your available tools for research MCPs (documentation queries, code search, web fetching) and use the most appropriate one for each question. Do not assume any specific MCP is present.'\n\n" +
             "[HORIZON TOOLS]\n" +
             "- horizon_init_session -- Initialize a new session\n" +
             "- horizon_write_plan -- Write/update plan.json\n" +

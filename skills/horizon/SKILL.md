@@ -69,6 +69,11 @@ The ONLY acceptable reasons to pause are:
 - Identify skills needed (global + session-scoped)
 - Estimate complexity (trivial / moderate / complex)
 - [OPTIONAL] Run **Hyperplan** adversarial plan hardening: call `parallax_hyperplan` tool with `mode: "generate"` to vet the plan from 5 adversarial angles. Complex or high-risk plans should always be hardened. Trivial plans auto-skip (complexity < 3). Run `mode: "synthesize"` after all 3 debate rounds to produce an insight bundle.
+- **CREATE SESSION-SCOPED SKILLS (MANDATORY for complex tasks):** Before execution begins, identify reusable patterns, conventions, or architecture decisions that will apply across multiple features. Create session-scoped skills for each:
+  - Call `horizon_create_skill` with a name, description, and full content
+  - Skills should capture: code patterns, naming conventions, architecture decisions, API contracts, testing patterns
+  - These skills are injected into sub-agent prompts during execution
+  - Example: if building a React app, create a "react-patterns" skill with component structure, state management, styling conventions
 - Create any session-scoped skills needed
 - Output plan.json
 
@@ -164,10 +169,27 @@ Use the most targeted tool for each question. If no specialized MCP is available
 
 ## SUB-AGENT DISPATCH
 
-When dispatching a sub-agent via `task()`, tell them to discover their own tools rather than hardcoding names:
+When dispatching a sub-agent via `task()`, you MUST inject session-scoped skills:
 
+1. **Read the plan** to get the `skills.sessionScoped` list
+2. **Read each skill** from `~/.parallax/horizon/sessions/<sessionId>/skills/<name>/SKILL.md`
+3. **Include in task prompt** under a `## SESSION-SCOPED SKILLS` section with the full skill content
+4. **Tell the sub-agent:** "Follow the patterns and conventions in the attached session-scoped skills. These are project-specific and override general defaults."
+5. **Also include:** "Scan your available tools for research MCPs (documentation queries, code search, web fetching) and use the most appropriate one for each question. Do not assume any specific MCP is present."
+
+Example task prompt structure:
 ```
-Include in task prompt: "Scan your available tools for research MCPs (documentation queries, code search, web fetching) and use the most appropriate one for each question. Do not assume any specific MCP is present."
+## TASK
+[The specific feature to implement]
+
+## ACCEPTANCE CRITERIA
+[What done means]
+
+## SESSION-SCOPED SKILLS
+[Full content of relevant skills]
+
+## TOOLS
+Scan your available tools for research MCPs...
 ```
 
 ## AUTONOMY LEVELS
@@ -224,12 +246,33 @@ Integrate the insight bundle into your plan before execution.
 
 ## SESSION-SCOPED SKILLS
 
-During PLAN phase, identify gaps where a custom skill would improve sub-agent quality:
+Session-scoped skills are reusable patterns, conventions, and knowledge that apply across multiple features in a session. They are created during the PLAN phase and injected into sub-agent prompts during execution.
 
-1. Generate skill content as a markdown file with YAML frontmatter
-2. Write to sessions/<id>/skills/<name>/SKILL.md
-3. Register in plan.json under skills.sessionScoped
-4. Sub-agents reference the skill in their task context
+### When to Create Skills (MANDATORY for complex tasks)
+
+Create session-scoped skills when:
+- Multiple features share the same code patterns (e.g., React component structure, API endpoint conventions)
+- Architecture decisions need to be consistent across features (e.g., state management approach, database schema patterns)
+- Testing patterns should be applied uniformly (e.g., mocking strategy, test file organization)
+- Naming conventions need enforcement (e.g., file naming, variable naming, CSS class naming)
+- Technology-specific patterns need documentation (e.g., Next.js app router patterns, Prisma schema conventions)
+
+### How to Create Skills
+
+1. Identify the pattern or convention that will be reused
+2. Call `horizon_create_skill` with:
+   - `name`: kebab-case name (e.g., "react-patterns", "api-conventions", "testing-strategy")
+   - `description`: What this skill covers
+   - `content`: Full markdown with patterns, examples, and constraints
+3. The skill is automatically registered in plan.json under `skills.sessionScoped`
+
+### How to Use Skills
+
+When dispatching sub-agents via `task()`:
+1. Read the plan to get `skills.sessionScoped` list
+2. Read each relevant skill file from `~/.parallax/horizon/sessions/<sessionId>/skills/<name>/SKILL.md`
+3. Include the skill content in the task prompt under `## SESSION-SCOPED SKILLS`
+4. Tell the sub-agent to follow the patterns in the attached skills
 
 ### Skill Template
 
