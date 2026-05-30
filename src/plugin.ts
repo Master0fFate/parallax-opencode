@@ -56,6 +56,31 @@ const protocolStore = new Map<string, ProtocolState>()
 let currentSessionId: string | null = null
 let currentAgentName: string | null = null
 
+// Known agent names for case-insensitive matching. Add new agents here.
+const KNOWN_AGENTS = ["parallax", "horizon"] as const
+
+// ---------------------------------------------------------------------------
+// Agent name resolution (case-insensitive)
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize agent name for case-insensitive comparison.
+ * Returns the lowercase, trimmed version of the name, or null if empty.
+ */
+function normalizeAgentName(name: string | null | undefined): string | null {
+  if (!name) return null
+  const normalized = name.trim().toLowerCase()
+  return normalized || null
+}
+
+/**
+ * Check if the current agent matches a known agent name (case-insensitive).
+ * Use this instead of `currentAgentName === "horizon"` to avoid case-sensitivity bugs.
+ */
+function isAgent(agentName: string): boolean {
+  return normalizeAgentName(currentAgentName) === normalizeAgentName(agentName)
+}
+
 // Protocol state uses a fixed key that never changes within a plugin load.
 // OpenCode creates multiple internal sessions (root, child, subagent) during
 // a single conversation. The protocol state must survive all of them.
@@ -131,9 +156,11 @@ function flushState(): void {
   try {
     const s = getFriction()
     const m = getMode()
-    // Read from disk: OpenCode loads plugin in separate execution contexts
-    // for tools vs hooks. In-memory Maps are NOT shared across contexts.
-    const p = readProtocolFromDisk() || getProtocol()
+    // Use in-memory state directly. flushState() is called AFTER in-memory
+    // stores have been modified (e.g. parallax_checkin sets flags, then calls
+    // writeState(true) -> flushState()). Reading from disk here would overwrite
+    // the just-set in-memory changes with stale disk data.
+    const p = getProtocol()
     const trace = getTrace(sessionId())
     const state = {
       sessionId: "current",
@@ -174,10 +201,10 @@ function writeState(immediate = false): void {
     try {
       const s = getFriction()
       const m = getMode()
-      // Read from disk: OpenCode may load plugin in different contexts
-      // for tools vs hooks, causing separate in-memory Maps.
-      const diskState = readProtocolFromDisk()
-      const p = diskState || getProtocol()
+      // Use in-memory state directly. writeState() is debounced from callers
+      // that just modified in-memory stores (tool.execute.before, parallax_checkin).
+      // Reading from disk here would overwrite those modifications with stale data.
+      const p = getProtocol()
       const state = {
         sessionId: "current",
         sessionStart: getTrace(sessionId()).session.startedAt,
@@ -206,6 +233,57 @@ function writeState(immediate = false): void {
   }, STATE_DEBOUNCE_MS)
 }
 
+
+// ---------------------------------------------------------------------------
+// Read full state from disk and sync all in-memory stores.
+// OpenCode loads plugins in separate execution contexts for tools vs hooks.
+// In-memory Maps are NOT shared across contexts. This function bridges the
+// gap by reading the persisted state.json and updating the current context's
+// in-memory stores so that subsequent getProtocol()/getMode()/getFriction()
+// calls return the correct values.
+// ---------------------------------------------------------------------------
+
+function syncStateFromDisk(): void {
+  try {
+    if (!existsSync(STATE_FILE)) return
+    const raw = readFileSync(STATE_FILE, "utf8")
+    const s = JSON.parse(raw)
+    if (!s) return
+
+    const sid = sessionId()
+
+    // Sync protocol state
+    if (s.protocol) {
+      protocolStore.set(sid, {
+        ambiguityDone: s.protocol.ambiguityDone === true,
+        invariantsDone: s.protocol.invariantsDone === true,
+        gateDone: s.protocol.gateDone === true,
+        designDone: s.protocol.designDone === true,
+        commitDone: s.protocol.commitDone === true,
+        summaryDone: s.protocol.summaryDone === true,
+        writesBeforeGate: typeof s.protocol.writesBeforeGate === "number" ? s.protocol.writesBeforeGate : 0,
+        gateBlocked: s.protocol.gateBlocked === true,
+      })
+    }
+
+    // Sync mode
+    if (s.mode && ["free", "plan", "build", "debug", "horizon"].includes(s.mode)) {
+      modeStore.set(sid, { mode: s.mode as AgentMode })
+    }
+
+    // Sync friction
+    if (s.friction) {
+      frictionStore.set(sid, {
+        successes: typeof s.friction.successes === "number" ? s.friction.successes : 0,
+        trials: typeof s.friction.trials === "number" ? s.friction.trials : 0,
+        retriesLeft: typeof s.friction.retriesLeft === "number" ? s.friction.retriesLeft : MAX_FRICTION_RETRIES,
+        lastObservation: s.friction.lastObservation || null,
+      })
+    }
+  } catch {
+    // Corrupt or unreadable state file -- ignore, defaults will be used
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Read protocol state from disk (write hook reads this, not in-memory Maps)
@@ -1699,6 +1777,102 @@ export const plugin: Plugin = async ({ client }) => {
           ].filter(Boolean).join("\n")
         },
       }),
+
+      // HEALTH -- diagnostic state inspection
+      parallax_health: tool({
+        description:
+          "Diagnostic tool that dumps the current state from all stores " +
+          "(in-memory + disk) and reports discrepancies. Use this to debug " +
+          "state issues, verify cross-context synchronization, or inspect " +
+          "the plugin's internal health.",
+        args: {},
+        async execute() {
+          const sid = sessionId()
+
+          // Read from in-memory stores
+          const memProtocol = getProtocol()
+          const memMode = getMode()
+          const memFriction = getFriction()
+
+          // Read from disk
+          const diskState = (() => {
+            try {
+              if (existsSync(STATE_FILE)) {
+                return JSON.parse(readFileSync(STATE_FILE, "utf8"))
+              }
+            } catch {}
+            return null
+          })()
+
+          const diskProtocol = diskState?.protocol || null
+          const diskMode = diskState?.mode || null
+          const diskFriction = diskState?.friction || null
+
+          // Compare function
+          const cmp = (a: unknown, b: unknown) => {
+            if (a === undefined && b === undefined) return "OK"
+            if (a === null && b === null) return "OK"
+            if (JSON.stringify(a) === JSON.stringify(b)) return "OK"
+            return "MISMATCH"
+          }
+
+          const protocolStatus = cmp(memProtocol, diskProtocol)
+          const modeStatus = cmp(memMode?.mode, diskMode)
+          const frictionStatus = cmp(
+            { successes: memFriction.successes, trials: memFriction.trials, retriesLeft: memFriction.retriesLeft },
+            diskFriction ? { successes: diskFriction.successes, trials: diskFriction.trials, retriesLeft: diskFriction.retriesLeft } : null
+          )
+
+          const allOk = protocolStatus === "OK" && modeStatus === "OK" && frictionStatus === "OK"
+          const verdict = allOk ? "HEALTHY" : "DESYNC DETECTED"
+
+          const lines = [
+            `## Parallax Health Check`,
+            ``,
+            `**Session ID:** \`${sid}\``,
+            `**Agent:** ${currentAgentName || "(none)"}`,
+            `**Mode (memory):** ${memMode.mode}`,
+            `**Mode (disk):** ${diskMode || "(no file)"}`,
+            `**State file:** ${STATE_FILE}`,
+            `**State exists:** ${diskState ? "yes" : "no"}`,
+            ``,
+            `### Cross-Context Synchronization`,
+            `  Protocol: ${protocolStatus === "OK" ? "OK" : "DESYNC -- memory != disk"}`,
+            `  Mode:     ${modeStatus === "OK" ? "OK" : "DESYNC -- memory != disk"}`,
+            `  Friction: ${frictionStatus === "OK" ? "OK" : "DESYNC -- memory != disk"}`,
+            ``,
+            `### In-Memory State`,
+            `  Protocol:`,
+            `    ambiguityDone:   ${memProtocol.ambiguityDone}`,
+            `    invariantsDone:  ${memProtocol.invariantsDone}`,
+            `    gateDone:        ${memProtocol.gateDone}`,
+            `    designDone:      ${memProtocol.designDone}`,
+            `    commitDone:      ${memProtocol.commitDone}`,
+            `    summaryDone:     ${memProtocol.summaryDone}`,
+            `    writesBeforeGate: ${memProtocol.writesBeforeGate}`,
+            `  Mode: ${memMode.mode}`,
+            `  Friction: ${memFriction.successes} ok / ${memFriction.trials} trials / ${memFriction.retriesLeft} retries`,
+            ``,
+            `### Disk State`,
+            diskProtocol ? [
+              `  Protocol:`,
+              `    ambiguityDone:   ${diskProtocol.ambiguityDone}`,
+              `    invariantsDone:  ${diskProtocol.invariantsDone}`,
+              `    gateDone:        ${diskProtocol.gateDone}`,
+              `    designDone:      ${diskProtocol.designDone}`,
+              `    commitDone:      ${diskProtocol.commitDone}`,
+              `    summaryDone:     ${diskProtocol.summaryDone}`,
+              `    writesBeforeGate: ${diskProtocol.writesBeforeGate}`,
+              `  Mode: ${diskMode}`,
+              `  Friction: ${diskFriction?.successes ?? "?"} ok / ${diskFriction?.trials ?? "?"} trials / ${diskFriction?.retriesLeft ?? "?"} retries`,
+            ].join("\n") : "  (no state file found)",
+            ``,
+            `**Verdict:** ${verdict}`,
+          ]
+
+          return lines.join("\n")
+        },
+      }),
     },
 
     // -----------------------------------------------------------------------
@@ -1717,16 +1891,22 @@ export const plugin: Plugin = async ({ client }) => {
       const horizonDir = join(".parallax", "horizon")
       const filePath = input.args?.filePath as string | undefined
       if (
-        currentAgentName === "horizon" &&
+        isAgent("horizon") &&
         filePath &&
-        filePath.includes(horizonDir)
+        // Normalize path separators for cross-platform comparison
+        filePath.replace(/\\/g, "/").includes(horizonDir.replace(/\\/g, "/"))
       ) {
         return
       }
 
       // Read from disk: OpenCode loads plugin in separate execution contexts
       // for tools vs hooks. In-memory Maps are NOT shared across contexts.
-      const p = readProtocolFromDisk() || getProtocol()
+      // syncStateFromDisk() reads state.json and updates ALL in-memory stores
+      // so that subsequent getProtocol() calls return the persisted values, and
+      // modifications (like writesBeforeGate++) are captured in-memory for
+      // writeState() to persist.
+      syncStateFromDisk()
+      const p = getProtocol()
       const cfg = loadConfig()
 
       // Enforce ambiguity check before any write
@@ -1784,6 +1964,9 @@ export const plugin: Plugin = async ({ client }) => {
     }) => {
       if (!["write", "edit", "apply_patch"].includes(input.tool)) return
 
+      // SYNC FROM DISK: Ensure friction state reflects any updates from other
+      // execution contexts (tools vs hooks run in separate contexts).
+      syncStateFromDisk()
       const s = getFriction()
       if (s.retriesLeft === 0) return
 
@@ -1862,10 +2045,10 @@ export const plugin: Plugin = async ({ client }) => {
           null
 
         // Agent name lives in Session.agent (v2 SDK types.gen.d.ts:590)
-        currentAgentName =
-          (info.agent as string) ||
-          (props.agent as string) ||
-          null
+        // Normalize to lowercase for case-insensitive matching via isAgent()
+        currentAgentName = normalizeAgentName(
+          (info.agent as string) || (props.agent as string)
+        )
 
         // Initialize trace with session info
         if (currentSessionId) {
@@ -1893,7 +2076,7 @@ export const plugin: Plugin = async ({ client }) => {
       // Track agent switches (TAB to change agent in OpenCode TUI)
       if (input.event.type === "session.next.agent.switched") {
         const props = input.event.properties as Record<string, unknown> | undefined
-        currentAgentName = (props?.agent as string) || null
+        currentAgentName = normalizeAgentName(props?.agent as string)
       }
 
     },
@@ -1903,6 +2086,7 @@ export const plugin: Plugin = async ({ client }) => {
     // -----------------------------------------------------------------------
 
     "shell.env": async (input: { cwd: string; sessionID?: string }, output: { env: Record<string, string> }) => {
+      syncStateFromDisk()
       const m = getMode()
       const s = getFriction()
       output.env.PARALLAX_MODE = m.mode
@@ -1918,6 +2102,12 @@ export const plugin: Plugin = async ({ client }) => {
       _input: unknown,
       output: { system?: string[] },
     ) => {
+      // SYNC FROM DISK: This hook runs in a separate execution context from
+      // tools. In-memory Maps are always fresh/empty here. We must read the
+      // persisted state from disk so the system prompt shows the ACTUAL
+      // protocol status (which steps are DONE vs PENDING). Without this,
+      // the agent sees all steps as PENDING even after checkins.
+      syncStateFromDisk()
       const m = getMode()
       const s = getFriction()
       const p = getProtocol()
@@ -2101,6 +2291,8 @@ export const plugin: Plugin = async ({ client }) => {
       _input: unknown,
       output: { context?: string[] },
     ) => {
+      // SYNC FROM DISK: Same context isolation issue as system.transform.
+      syncStateFromDisk()
       const s = getFriction()
       const m = getMode()
       const p = getProtocol()
