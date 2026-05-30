@@ -2,6 +2,57 @@
 
 All notable changes to the Parallax Engine will be documented in this file.
 
+## [0.6.6] - 2026-05-30
+
+### Changed
+- Merged `skills/parallax/SKILL.md` into `agents/parallax.md` (one source of truth)
+- Merged `skills/horizon/SKILL.md` into `agents/horizon.md` (one source of truth)
+- Removed `skills/parallax/` and `skills/horizon/` directories (500+ lines of redundancy eliminated)
+- Updated `MODE_META` to not inject base skills (horizon mode: skill null)
+- Agent prompts now self-contained (no duplicate skill injection)
+
+### Added
+- Lazy loading pattern for session-scoped skills in Horizon (check before dispatch, create if needed)
+- `parallax_health` diagnostic tool (state inspection, cross-context sync verification)
+
+## [0.6.5] - 2026-05-30
+
+### Changed
+- Parallax agent prompt: 112 -> 92 lines (18% shorter)
+- Horizon agent prompt: 306 -> 95 lines (69% shorter)
+
+### Added
+- Parallax: concrete BAD/GOOD examples for 4 Invariants (Step 2)
+- Parallax: EVIDENCE requirement for Verification Gate (Step 3)
+- Horizon: honest scoring guidance column in evaluation matrix
+- Horizon: HONEST SCORING RULE ("give yourself the score you'd give a junior dev")
+- Horizon: concrete examples in Protocol Level Decision Matrix
+
+## [0.6.4] - 2026-05-30
+
+### Fixed
+- Cross-context state desynchronization (system prompt always showed PENDING)
+- `flushState()` overwrote in-memory changes with stale disk data
+- `writeState()` debounced re-read disk instead of using in-memory state
+- `tool.execute.before` didn't sync in-memory store from disk
+- `experimental.chat.system.transform` didn't read from disk (stale state)
+- `experimental.session.compacting` didn't read from disk
+- `shell.env` didn't read from disk
+- `tool.execute.after` didn't read from disk
+- Case-sensitive agent name check in Horizon write exemption
+- Path separator mismatch in Horizon write exemption (cross-platform)
+
+### Added
+- `syncStateFromDisk()` helper: reads state.json, updates all 3 in-memory stores (protocol, mode, friction)
+- `normalizeAgentName()` and `isAgent()` helpers for case-insensitive agent name handling
+- `parallax_health` diagnostic tool
+- `hook-enforcement.test.ts`: 11 integration tests for actual hook behavior
+- Tests: 99 -> 110 (11 new integration tests)
+
+### Changed
+- Agent names normalized at assignment point (event hooks) and comparison point (isAgent)
+- All hooks now call `syncStateFromDisk()` before reading state
+
 ## [0.6.0] - 2026-05-28
 
 ### Added
