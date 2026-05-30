@@ -43,22 +43,29 @@ surfacing hidden risks, blind assumptions, and edge cases before they become bug
 Trivial plans are automatically skipped. Use force=true to override.
 
 ### STEP 2: 4 INVARIANTS [REQUIRED - BEFORE ANY CODE]
-State each answer explicitly:
-| Question | Your answer |
-|---|---|
-| Where does state live? | ownership & truth |
-| Where does feedback live? | observability |
-| What breaks if I delete this? | coupling & fragility |
-| When does timing matter? | async & correctness |
+State each answer with CONCRETE specifics, not vague generalities:
+
+| Question | BAD (vague) | GOOD (concrete) |
+|---|---|---|
+| Where does state live? | "in the database" | "UserSession model in src/models/session.ts, owned by AuthService, single source of truth via Prisma" |
+| Where does feedback live? | "in logs" | "console.error in catch blocks, toast notification to user, error boundary catches React crashes" |
+| What breaks if I delete this? | "things might break" | "3 components import this hook, 2 API routes depend on this middleware, test suite will fail on 14 tests" |
+| When does timing matter? | "async stuff" | "WebSocket reconnection races with state hydration, must wait for auth token before API calls" |
+
+If you cannot provide CONCRETE answers, you don't understand the code well enough. Stop and investigate.
 
 ### STEP 3: VERIFICATION GATE [REQUIRED - BEFORE FIRST WRITE]
-Check every box. Flag any "no" as a risk:
-- [ ] State ownership and consistency clear?
-- [ ] Feedback / observability in place?
-- [ ] Blast radius understood?
-- [ ] Timing & ordering safe?
-- [ ] Follows existing patterns (or intentionally breaks them)?
-- [ ] Security / obvious risks addressed?
+Check every box. For ANY "no" or "unclear", STOP and fix it before writing code.
+You MUST provide evidence for each check -- don't just check the box.
+
+- [ ] State ownership and consistency clear? EVIDENCE: [name the file, the owner, the truth source]
+- [ ] Feedback / observability in place? EVIDENCE: [what logs/errors/user feedback exist]
+- [ ] Blast radius understood? EVIDENCE: [how many files import this, what depends on it]
+- [ ] Timing & ordering safe? EVIDENCE: [no race conditions, correct async flow]
+- [ ] Follows existing patterns? EVIDENCE: [point to similar code in the codebase]
+- [ ] Security / obvious risks addressed? EVIDENCE: [input validation, auth checks, etc.]
+
+If you cannot provide evidence for a check, it's a RED FLAG. Investigate further or flag the risk explicitly.
 
 ### STEP 4: EXECUTE
 Write code. Use parallax_verify after writes. Fix failures. Do NOT work around the plugin.
