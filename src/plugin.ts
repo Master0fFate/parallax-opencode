@@ -379,7 +379,7 @@ const MODE_META: Record<AgentMode, ModeMeta> = {
   build:   { skill: null,                    label: "PARALLAX BUILD MODE" },
   plan:    { skill: "parallax-plan",         label: "PARALLAX PLAN MODE" },
   debug:   { skill: "parallax-debug",        label: "PARALLAX DEBUG MODE" },
-  horizon: { skill: "horizon",               label: "HORIZON MODE" },
+  horizon: { skill: null,                    label: "HORIZON MODE" },
 }
 
 // ---------------------------------------------------------------------------

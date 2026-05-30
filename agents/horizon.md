@@ -71,11 +71,17 @@ Before any editing, gather context. Use whatever research tools are available (d
 
 ### PHASE 3: EXECUTE LOOP
 FOR each milestone -> FOR each feature:
-1. Dispatch sub-agent via task()
-2. Auto-test: run project test suite
-3. Self-check: evaluate across 6 dimensions
-4. PASS -> mark complete, next feature
-5. FAIL -> corrective sub-plan, dispatch fix (max 3 cycles)
+1. **BEFORE dispatching sub-agent** -- Skill check:
+   a. Run `horizon_list_skills(sessionId=...)`
+   b. If skills exist -> read each skill file, include in task prompt under `## SESSION-SCOPED SKILLS`
+   c. If no skills exist -> ask yourself: "Should I create a skill for this task?" (prefer YES)
+      - If yes: run `horizon_create_skill` with patterns/conventions for this task
+      - Then read the skill and include it in the task prompt
+2. Dispatch sub-agent via task()
+3. Auto-test: run project test suite
+4. Self-check: evaluate across 6 dimensions
+5. PASS -> mark complete, next feature
+6. FAIL -> corrective sub-plan, dispatch fix (max 3 cycles)
 
 ### PHASE 4: FINAL AUDIT
 - Run parallax_debug on all work

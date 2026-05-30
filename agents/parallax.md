@@ -32,15 +32,35 @@ CONSEQUENCE: Plugin will block writes if this step is skipped.
 
 ### STEP 1.5: HYPERPLAN [OPTIONAL - PLAN HARDENING]
 For non-trivial plans, harden them with adversarial critique BEFORE writing invariants.
-Hyperplan spawns 5 hostile agents that attack your plan from orthogonal angles,
-surfacing hidden risks, blind assumptions, and edge cases before they become bugs:
+Hyperplan spawns 5 hostile agents that attack your plan from orthogonal angles.
 
-1. Assess plan complexity using `parallax_hyperplan(mode: "generate", plan: "...")`
-2. If complexity is MODERATE or COMPLEX, dispatch sub-agents in parallel via `task()`
-3. Collect critiques and synthesize using `parallax_hyperplan(mode: "synthesize", ...)`
-4. Revise plan based on surviving insights before proceeding to invariants
+**When to Use:**
+- Complex plans (multi-file, cross-module, high-risk) -- ALWAYS
+- Moderate plans (new feature with known patterns) -- RECOMMENDED
+- Trivial plans (typo fix, single-file config) -- SKIP
 
-Trivial plans are automatically skipped. Use force=true to override.
+**The 3-Round Debate:**
+
+Round 1 -- Independent Analysis (parallel)
+Dispatch 5 adversarial critics via task():
+- Pragmatist: Is this practical? Does it ship?
+- Integration Tester: Does this integrate cleanly? What breaks?
+- Sentinel: What is the worst case? Security, failure, edge cases?
+- Architectural Strategist: Does this fit the architecture?
+- Humanist: Can a human understand and maintain this?
+
+Round 2 -- Cross-Attack
+Each critic attacks all other critics' findings:
+- DEFEND (stands), REFINE (revise), or CONCEDE (admit wrong)
+- Default: REJECT -- only concede when evidence forces it
+
+Round 3 -- Defense & Refinement
+Each critic defends their own findings under attack:
+- DEFEND: Concrete evidence required
+- REFINE: Stronger version incorporating valid criticism
+- CONCEDE: State what survives
+
+**Usage:** Call `parallax_hyperplan` tool with mode: "generate" for rounds, "synthesize" for insight bundle.
 
 ### STEP 2: 4 INVARIANTS [REQUIRED - BEFORE ANY CODE]
 State each answer with CONCRETE specifics, not vague generalities:
@@ -84,9 +104,33 @@ After finishing, output:
 - Verification passed?
 - Remaining concerns
 
-## MODES
+## FRICTION LOOP PROTOCOL
 
-Use these tools to load specialized skills for each phase:
+After every write/edit operation, auto-verify:
+
+1. Detect project type (Cargo.toml, package.json, pyproject.toml)
+2. Run appropriate check (cargo check, tsc, lint, compileall)
+3. On FAILURE: fix and retry (3 retries max, reset on success)
+4. On EXHAUSTION: stop and report -- do not continue
+
+## PLANNING PROTOCOL
+
+PHASE 1 -- RECONNAISSANCE: Explore before planning. Read structure, configs, existing patterns.
+
+PHASE 2 -- PARALLAX ANALYSIS per component:
+- Nominal case (happy path)
+- Edge cases: empty, boundary, error, concurrency, state transitions, security, backward compat
+- Cross-cutting: error handling, observability, performance, testability, rollback
+
+PHASE 3 -- PLAN SYNTHESIS: Atomic items with verification steps, in execution order.
+
+PHASE 4 -- EXECUTE: Implement item by item, verify each change.
+
+PHASE 5 -- ADAPT: Add/reorder as requirements change.
+
+PHASE 6 -- SUMMARIZE: What was built, edge cases handled, verification passed, remaining concerns.
+
+## MODES
 
 | Mode | Tool | Phase | Loads |
 |---|---|---|---|
@@ -103,6 +147,7 @@ Use these tools to load specialized skills for each phase:
 - parallax_debug -- Switch to DEBUG mode
 - parallax_checkin -- Mark a protocol step complete (plugin tracks this)
 - parallax_trace_export -- Export session trace to JSON file (includes coherence score)
+- parallax_health -- Diagnostic tool for state inspection
 
 ## RED LINES (Stop Immediately)
 
