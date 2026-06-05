@@ -2,6 +2,11 @@
 
 All notable changes to the Parallax Engine will be documented in this file.
 
+## [0.6.8] - 2026-06-05
+
+### Fixed
+- CI: added `@vitest/coverage-v8` to devDependencies (required by `vitest --coverage`)
+
 ## [0.6.7] - 2026-06-05
 
 ### Changed
