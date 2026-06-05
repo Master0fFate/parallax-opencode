@@ -31,3 +31,8 @@ data/*.sqlite
 
 # Test coverage
 coverage/
+
+# Data assets (screenshots, etc.)
+data/*.png
+data/*.jpg
+data/*.jpeg

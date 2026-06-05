@@ -2,6 +2,16 @@
 
 All notable changes to the Parallax Engine will be documented in this file.
 
+## [0.6.7] - 2026-06-05
+
+### Changed
+- CI matrix: added Windows and macOS to test pipeline (3 OS x 2 Node versions = 6 jobs)
+- `fail-fast: false` so platform failures don't cancel other jobs
+- `package.json` `files`: excluded `scripts/publish.mjs` from npm package (release tool only)
+
+### Added
+- `.gitignore`: ignore `data/*.png`, `data/*.jpg`, `data/*.jpeg` (screenshot assets)
+
 ## [0.6.6] - 2026-05-30
 
 ### Changed
