@@ -35,3 +35,6 @@ jobs:
 
       - name: Build
         run: npx tsc --project tsconfig.build.json
+
+      - name: Package smoke
+        run: npm pack --dry-run

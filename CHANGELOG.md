@@ -2,6 +2,22 @@
 
 All notable changes to the Parallax Engine will be documented in this file.
 
+## [0.6.9] - 2026-06-07
+
+### Fixed
+- Replaced Bun-only verification with Node `child_process.spawnSync` for npm users.
+- Removed npm lifecycle config mutations; install is now explicit through `npx parallax-opencode`.
+- Repaired installer manifest to copy only packaged agents and mode skills.
+- Default strict protocol enforcement now blocks writes until ambiguity, invariants, and verification gate are complete.
+- Hardened Horizon persistence IDs against path traversal and added atomic writes for core files.
+- Fixed trace export ordering so coherence score is serialized.
+- Fixed CLI version drift and historical trace export overwrite behavior.
+
+### Added
+- Installer smoke test with isolated OpenCode config directory.
+- CI package smoke using `npm pack --dry-run`.
+- README update/uninstall/filesystem side-effect guidance.
+
 ## [0.6.8] - 2026-06-05
 
 ### Fixed

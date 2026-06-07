@@ -53,6 +53,14 @@ vi.mock("fs", () => {
       mockFs.files[key] = (mockFs.files[key] || "") + data
       mockFs.exists[key] = true
     }),
+    renameSync: vi.fn((src: string, dst: string) => {
+      const srcKey = norm(src)
+      const dstKey = norm(dst)
+      mockFs.files[dstKey] = mockFs.files[srcKey] || ""
+      mockFs.exists[dstKey] = true
+      delete mockFs.files[srcKey]
+      delete mockFs.exists[srcKey]
+    }),
   }
 })
 
@@ -185,6 +193,10 @@ describe("Horizon Session Init", () => {
     horizon.initHorizonSession("test-session-2", "Test", "full")
     const plan = horizon.readHorizonPlan("test-session-2")
     expect(plan).not.toBeNull()
+  })
+
+  it("rejects traversal session IDs", () => {
+    expect(() => horizon.initHorizonSession("../escape", "Test", "full")).toThrow("Invalid sessionId")
   })
 })
 
@@ -412,6 +424,10 @@ describe("Horizon Skills", () => {
     const plan = horizon.readHorizonPlan("test-session")
     expect(plan!.skills.sessionScoped).toContain("react-patterns")
   })
+
+  it("rejects traversal skill names", () => {
+    expect(() => horizon.createHorizonSkill("test-session", "../escape", "Bad", "Bad")).toThrow("Invalid skill name")
+  })
 })
 
 describe("Horizon Traces", () => {
@@ -419,6 +435,10 @@ describe("Horizon Traces", () => {
     horizon.saveHorizonSubAgentTrace("test-session", "sub-agent-1", '{"test": true}')
     const traces = horizon.listHorizonTraces("test-session")
     expect(traces).toContain("sub-agent-1")
+  })
+
+  it("rejects traversal trace IDs", () => {
+    expect(() => horizon.saveHorizonSubAgentTrace("test-session", "../escape", "{}")).toThrow("Invalid subAgentSessionId")
   })
 })
 

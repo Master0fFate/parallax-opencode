@@ -32,9 +32,10 @@ import {
   readFileSync,
   readdirSync,
   appendFileSync,
+  renameSync,
 } from "fs"
 import { homedir } from "os"
-import { join } from "path"
+import { basename, join, resolve } from "path"
 
 import type {
   HorizonPlan,
@@ -66,8 +67,38 @@ function ensureDir(p: string): void {
   if (!existsSync(p)) mkdirSync(p, { recursive: true })
 }
 
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+function assertSafeId(kind: string, value: string): string {
+  if (!ID_PATTERN.test(value) || value === "." || value === ".." || basename(value) !== value) {
+    throw new Error(`[horizon] Invalid ${kind}: ${value}`)
+  }
+  return value
+}
+
+function containedPath(root: string, ...segments: string[]): string {
+  const resolvedRoot = resolve(root)
+  const resolvedPath = resolve(root, ...segments)
+  if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(resolvedRoot + "\\") && !resolvedPath.startsWith(resolvedRoot + "/")) {
+    throw new Error(`[horizon] Path escapes root: ${resolvedPath}`)
+  }
+  return resolvedPath
+}
+
+function writeJsonAtomic(path: string, value: unknown): void {
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
+  writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8")
+  renameSync(tmp, path)
+}
+
+function writeTextAtomic(path: string, value: string): void {
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
+  writeFileSync(tmp, value, "utf8")
+  renameSync(tmp, path)
+}
+
 function sessionDir(sessionId: string): string {
-  return join(SESSIONS_DIR, sessionId)
+  return containedPath(SESSIONS_DIR, assertSafeId("sessionId", sessionId))
 }
 
 function now(): string {
@@ -102,7 +133,7 @@ export function loadHorizonConfig(): HorizonConfig {
 
 export function saveHorizonConfig(config: HorizonConfig): void {
   ensureDir(HORIZON_DIR)
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8")
+  writeJsonAtomic(CONFIG_PATH, config)
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +154,7 @@ export function loadHorizonIndex(): HorizonIndex {
 
 export function saveHorizonIndex(index: HorizonIndex): void {
   ensureDir(HORIZON_DIR)
-  writeFileSync(INDEX_PATH, JSON.stringify(index, null, 2), "utf8")
+  writeJsonAtomic(INDEX_PATH, index)
 }
 
 function updateIndexEntry(
@@ -171,7 +202,7 @@ export function initHorizonSession(
       estimatedCost: null,
     },
   }
-  writeFileSync(join(dir, "plan.json"), JSON.stringify(plan, null, 2), "utf8")
+  writeJsonAtomic(join(dir, "plan.json"), plan)
 
   // Create state.json
   const state: HorizonState = {
@@ -184,10 +215,10 @@ export function initHorizonSession(
     pausedAt: null,
     pauseReason: null,
   }
-  writeFileSync(join(dir, "state.json"), JSON.stringify(state, null, 2), "utf8")
+  writeJsonAtomic(join(dir, "state.json"), state)
 
   // Create decisions.jsonl (empty)
-  writeFileSync(join(dir, "decisions.jsonl"), "", "utf8")
+  writeTextAtomic(join(dir, "decisions.jsonl"), "")
 
   // Create index entry
   const index = loadHorizonIndex()
@@ -217,7 +248,7 @@ export function readHorizonPlan(sessionId: string): HorizonPlan | null {
 export function writeHorizonPlan(sessionId: string, plan: HorizonPlan): void {
   const dir = sessionDir(sessionId)
   ensureDir(dir)
-  writeFileSync(join(dir, "plan.json"), JSON.stringify(plan, null, 2), "utf8")
+  writeJsonAtomic(join(dir, "plan.json"), plan)
 
   // Sync index status
   updateIndexEntry(sessionId, (entry) => ({ ...entry, status: plan.status }))
@@ -305,7 +336,7 @@ export function writeHorizonState(sessionId: string, state: HorizonState): void 
   const dir = sessionDir(sessionId)
   ensureDir(dir)
   state.lastCheckpoint = now()
-  writeFileSync(join(dir, "state.json"), JSON.stringify(state, null, 2), "utf8")
+  writeJsonAtomic(join(dir, "state.json"), state)
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +421,8 @@ export function createHorizonSkill(
   description: string,
   content: string,
 ): void {
-  const dir = join(sessionDir(sessionId), "skills", name)
+  assertSafeId("skill name", name)
+  const dir = containedPath(join(sessionDir(sessionId), "skills"), name)
   ensureDir(dir)
 
   const skillContent = [
@@ -404,7 +436,7 @@ export function createHorizonSkill(
     content,
   ].join("\n")
 
-  writeFileSync(join(dir, "SKILL.md"), skillContent, "utf8")
+  writeTextAtomic(join(dir, "SKILL.md"), skillContent)
 
   // Register in plan.json
   const plan = readHorizonPlan(sessionId)
@@ -438,9 +470,10 @@ export function saveHorizonSubAgentTrace(
   subAgentSessionId: string,
   traceData: string,
 ): void {
+  assertSafeId("subAgentSessionId", subAgentSessionId)
   const dir = join(sessionDir(sessionId), "traces")
   ensureDir(dir)
-  writeFileSync(join(dir, `${subAgentSessionId}.json`), traceData, "utf8")
+  writeTextAtomic(containedPath(dir, `${subAgentSessionId}.json`), traceData)
 }
 
 export function listHorizonTraces(sessionId: string): string[] {

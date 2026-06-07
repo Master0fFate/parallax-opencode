@@ -96,13 +96,46 @@ Horizon is a supervisor/orchestrator that wraps Parallax as a reasoning module a
 
 ---
 
-## 3. AUTONOMOUS DECISION ENGINE
+## 3. INTERACTION POLICY AND PARALLAX GATE
 
-Since Horizon must run unattended for multi-hour/multi-day tasks, it cannot pause mid-execution to ask the user questions. Instead, it uses an autonomous decision protocol.
+Horizon interacts with the user at exactly TWO windows:
 
-### Decision Protocol
+| Window | Allowed? | Purpose |
+|---|---|---|
+| Pre-execution (Parallax Gate) | YES | Resolve ambiguity ONCE before any work begins |
+| Mid-execution | NO | Hard ban. Decide, log, proceed. |
+| Post-execution (Final Report) | YES | Deliver results, decisions log, residual questions |
 
-When Horizon encounters ambiguity that would normally require user input:
+**Mid-execution ban is absolute.** The only legal mid-execution pause is a HARD BLOCKER — missing API credentials, private repo access, hardware, or paid-tier account access the user alone possesses. Design choices, library selection, naming, scope, edge cases, tests, retries, and refactors are NEVER blockers.
+
+### 3.1 Parallax Gate (Pre-Execution, Phase 0)
+
+The Gate is the first action of every task, before any tool call, before any research.
+
+**Ambiguity Levels:**
+
+| Level | Signal | Action |
+|---|---|---|
+| LOW | Specific, scoped, single-domain, clear acceptance criteria | Proceed immediately. No questions. |
+| MEDIUM | 1–2 gaps; reasonable defaults exist but require user preference | Ask 1–3 targeted questions, then proceed. |
+| HIGH | Vague, conceptual, multi-domain, contradictory, or has hidden requirements | Ask 3+ questions covering goal, scope, constraints, success criteria. |
+
+**Question Protocol:**
+- Multiple choice for enumerable options; open-ended only when unbounded.
+- Bundle ALL questions in a single batch — never drip-feed.
+- Each question must tie to a specific decision it unblocks.
+- Stop tool calls the moment the batch is delivered; resume only after the user answers.
+
+**Gate Resolution:**
+- LOW → proceed to Phase 1.
+- MEDIUM/HIGH → user answers → re-run Gate to confirm LOW → proceed.
+- User declines / time-sensitive / non-interactive → fall back to autonomous defaults via Decision Engine, log in `decisions.jsonl`, proceed. The Gate is never a blocker itself.
+
+**Re-Gate Triggers:** Re-run mid-execution ONLY on a new hard blocker. Do not re-Gate for ordinary design or scope decisions.
+
+### 3.2 Autonomous Decision Engine (Post-Gate, Mid-Execution)
+
+Once the Gate has resolved and execution is underway, the user is NOT consulted. New ambiguity is resolved here.
 
 1. **IDENTIFY** the ambiguity explicitly
 2. **RESEARCH** if possible (web search, codebase context, project conventions)
@@ -111,7 +144,9 @@ When Horizon encounters ambiguity that would normally require user input:
    - Industry best practices (from research phase)
    - Conservative defaults (prefer safety over cleverness)
 4. **DOCUMENT** the decision in `decisions.jsonl` for post-hoc review
-5. **PROCEED** -- do not block
+5. **PROCEED** — do not block
+
+Scope: design choices, library selection, naming, edge cases, error paths, scope expansion, refactor boundaries, test coverage, retry strategy, configuration values, internal architecture. None of these are user-facing.
 
 ### Decision Audit Log Format (decisions.jsonl)
 
@@ -143,6 +178,12 @@ When Horizon encounters ambiguity that would normally require user input:
 ---
 
 ## 4. WORKFLOW PHASES (Detailed)
+
+### 4.0 PARALLAX GATE PHASE (Phase 0, mandatory first action)
+
+See [Section 3.1](#31-parallax-gate-pre-execution-phase-0). The Gate runs before any other phase. If the Gate is skipped, every downstream decision is invalid.
+
+**Exit conditions:** ambiguity rated LOW (with or without user input) before Phase 1 begins.
 
 ### 4.1 RESEARCH PHASE
 

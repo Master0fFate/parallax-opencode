@@ -18,12 +18,12 @@
  * Copyright (c) 2026 Master0fFate
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { join } from "path"
 import {
   listTraceFiles,
   loadTrace,
-  exportTrace,
+  writeTraceFile,
 } from "./trace.js"
 import {
   computeCoherenceScore,
@@ -43,12 +43,22 @@ import {
 
 const PARALLAX_DIR = ".parallax"
 
+function packageVersion(): string {
+  try {
+    const url = new URL("../package.json", import.meta.url)
+    const pkg = JSON.parse(readFileSync(url, "utf8")) as { version?: string }
+    return pkg.version || "unknown"
+  } catch {
+    return "unknown"
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Help & version
 // ---------------------------------------------------------------------------
 
 function showHelp(): void {
-  console.log(`Parallax Engine CLI v0.2.0`)
+  console.log(`Parallax Engine CLI v${packageVersion()}`)
   console.log(``)
   console.log(`Usage: parallax <command> [options]`)
   console.log(``)
@@ -68,7 +78,7 @@ function showHelp(): void {
 }
 
 function showVersion(): void {
-  console.log("0.2.0")
+  console.log(packageVersion())
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +191,7 @@ async function cmdTraceExport(id: string): Promise<number> {
     return 1
   }
 
-  const filePath = exportTrace(id, true)
+  const filePath = writeTraceFile(trace, true)
   console.log(`Trace exported to: ${filePath}`)
   return 0
 }

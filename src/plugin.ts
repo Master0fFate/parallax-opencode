@@ -11,9 +11,9 @@
  */
 
 import { type Plugin, tool } from "@opencode-ai/plugin"
-import { readFileSync, writeFileSync, existsSync } from "fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { homedir } from "os"
-import { join } from "path"
+import { join, resolve } from "path"
 
 import type {
   AgentMode,
@@ -146,6 +146,22 @@ function loadConfig(): ParallaxConfig {
   return configCache || {}
 }
 
+function strictness(): NonNullable<ParallaxConfig["strictness"]> {
+  return loadConfig().strictness || "strict"
+}
+
+function isStrictMode(): boolean {
+  return strictness() === "strict"
+}
+
+function isPathInside(root: string, target: string): boolean {
+  const resolvedRoot = resolve(root)
+  const resolvedTarget = resolve(target)
+  return resolvedTarget === resolvedRoot ||
+    resolvedTarget.startsWith(resolvedRoot + "\\") ||
+    resolvedTarget.startsWith(resolvedRoot + "/")
+}
+
 // ---------------------------------------------------------------------------
 // State persistence (Phase 2.1)
 // ---------------------------------------------------------------------------
@@ -154,6 +170,7 @@ let stateDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
 function flushState(): void {
   try {
+    mkdirSync(join(process.cwd(), ".parallax"), { recursive: true })
     const s = getFriction()
     const m = getMode()
     // Use in-memory state directly. flushState() is called AFTER in-memory
@@ -226,6 +243,7 @@ function writeState(immediate = false): void {
           gateBlocked: p.gateBlocked,
         },
       }
+      mkdirSync(join(process.cwd(), ".parallax"), { recursive: true })
       writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8")
     } catch {
       // Best-effort: don't crash the plugin if disk is full
@@ -1615,12 +1633,10 @@ export const plugin: Plugin = async ({ client }) => {
         async execute(args: { pretty?: boolean }) {
           const sid = sessionId()
           const pretty = args.pretty === true
-          const filePath = exportTrace(sid, pretty)
           const trace = getTrace(sid)
-
-          // Compute and attach score
           const breakdown = computeCoherenceScore(trace)
           trace.coherenceScore = breakdown.total
+          const filePath = exportTrace(sid, pretty)
 
           return (
             `[parallax] Trace exported: ${filePath}\n` +
@@ -1888,13 +1904,12 @@ export const plugin: Plugin = async ({ client }) => {
       // enforcement. Horizon's orchestration writes (plan.json, state.json,
       // research files, skills, decisions) are autonomous operations that
       // should not require Parallax protocol steps.
-      const horizonDir = join(".parallax", "horizon")
+      const horizonDir = join(process.cwd(), ".parallax", "horizon")
       const filePath = input.args?.filePath as string | undefined
       if (
         isAgent("horizon") &&
         filePath &&
-        // Normalize path separators for cross-platform comparison
-        filePath.replace(/\\/g, "/").includes(horizonDir.replace(/\\/g, "/"))
+        isPathInside(horizonDir, filePath)
       ) {
         return
       }
@@ -1909,7 +1924,20 @@ export const plugin: Plugin = async ({ client }) => {
       const p = getProtocol()
       const cfg = loadConfig()
 
-      // Enforce ambiguity check before any write
+      if (isStrictMode() && (!p.ambiguityDone || !p.invariantsDone || !p.gateDone)) {
+        const missing = [
+          !p.ambiguityDone ? "Ambiguity Check (Step 1)" : null,
+          !p.invariantsDone ? "4 Invariants (Step 2)" : null,
+          !p.gateDone ? "Verification Gate (Step 3)" : null,
+        ].filter(Boolean).join(", ")
+        throw new Error(
+          `[parallax] PROTOCOL VIOLATION: strict mode blocks writes until required gates are complete.\n` +
+          `Missing: ${missing}.\n` +
+          `Use parallax_checkin for ambiguity, invariants, and gate after completing each step.`,
+        )
+      }
+
+      // Enforce ambiguity check before any write in non-strict modes too.
       if (!p.ambiguityDone) {
         throw new Error(
           `[parallax] PROTOCOL VIOLATION: Ambiguity Check (Step 1) not completed.\n` +
@@ -1929,7 +1957,7 @@ export const plugin: Plugin = async ({ client }) => {
         )
       }
 
-      // Warn after 3 writes without invariants checkin
+      // Standard/relaxed mode keeps the historical soft invariant behavior.
       if (!p.invariantsDone) {
         p.writesBeforeGate++
         writeState()

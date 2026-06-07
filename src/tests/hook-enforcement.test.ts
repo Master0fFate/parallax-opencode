@@ -180,8 +180,8 @@ describe("Hook Enforcement Integration", () => {
       ).rejects.toThrow("Ambiguity Check")
     })
 
-    it("should allow writes after ambiguity checkin", async () => {
-      // Write state with ambiguity done
+    it("should block writes until invariants and gate are complete in strict mode", async () => {
+      // Write state with ambiguity done only
       const state = {
         sessionId: "current",
         sessionStart: new Date().toISOString(),
@@ -204,7 +204,37 @@ describe("Hook Enforcement Integration", () => {
       const client = createMockClient()
       const hooks = await plugin({ client } as any)
 
-      // Should not throw
+      await expect(
+        (hooks as any)["tool.execute.before"]({
+          tool: "write",
+          args: { filePath: "test.ts" },
+        })
+      ).rejects.toThrow("strict mode")
+    })
+
+    it("should allow writes after ambiguity, invariants, and gate checkins", async () => {
+      const state = {
+        sessionId: "current",
+        sessionStart: new Date().toISOString(),
+        mode: "free",
+        friction: { successes: 0, trials: 0, retriesLeft: 3, lastObservation: null },
+        protocol: {
+          ambiguityDone: true,
+          invariantsDone: true,
+          gateDone: true,
+          designDone: false,
+          commitDone: false,
+          summaryDone: false,
+          writesBeforeGate: 0,
+          gateBlocked: false,
+        },
+      }
+      writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8")
+
+      const { plugin } = await import("../plugin.js")
+      const client = createMockClient()
+      const hooks = await plugin({ client } as any)
+
       await expect(
         (hooks as any)["tool.execute.before"]({
           tool: "write",
@@ -237,18 +267,50 @@ describe("Hook Enforcement Integration", () => {
       const client = createMockClient()
       const hooks = await plugin({ client } as any)
 
-      // Set agent name to "horizon" (simulating agent switch)
-      // The event hook sets currentAgentName, but we can test the exemption
-      // by calling the hook with a horizon path
-      // Note: This test verifies the path check works; agent name is set via events
+      await (hooks as any).event({
+        event: { type: "session.next.agent.switched", properties: { agent: "Horizon" } },
+      })
 
-      // For this test, we verify the hook doesn't throw for non-write tools
       await expect(
         (hooks as any)["tool.execute.before"]({
-          tool: "read",
+          tool: "write",
           args: { filePath: ".parallax/horizon/sessions/test/plan.json" },
         })
       ).resolves.toBeUndefined()
+    })
+
+    it("should not exempt traversal paths that merely contain .parallax/horizon", async () => {
+      const state = {
+        sessionId: "current",
+        sessionStart: new Date().toISOString(),
+        mode: "horizon",
+        friction: { successes: 0, trials: 0, retriesLeft: 3, lastObservation: null },
+        protocol: {
+          ambiguityDone: false,
+          invariantsDone: false,
+          gateDone: false,
+          designDone: false,
+          commitDone: false,
+          summaryDone: false,
+          writesBeforeGate: 0,
+          gateBlocked: false,
+        },
+      }
+      writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8")
+
+      const { plugin } = await import("../plugin.js")
+      const client = createMockClient()
+      const hooks = await plugin({ client } as any)
+      await (hooks as any).event({
+        event: { type: "session.next.agent.switched", properties: { agent: "horizon" } },
+      })
+
+      await expect(
+        (hooks as any)["tool.execute.before"]({
+          tool: "write",
+          args: { filePath: "outside/.parallax/horizon/../../escape.json" },
+        })
+      ).rejects.toThrow("PROTOCOL VIOLATION")
     })
 
     it("should not block non-write tools", async () => {

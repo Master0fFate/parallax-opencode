@@ -1,6 +1,6 @@
 {
   "name": "parallax-opencode",
-  "version": "0.6.8",
+  "version": "0.6.9",
   "description": "PARALLAX ENGINE plugin for OpenCode -- protocol enforcement, friction-loop verification, mode switching (plan/build/debug/horizon), trace recording, coherence scoring, CI gate, PR-ready trace artifacts, and autonomous long-horizon supervision",
   "type": "module",
   "main": "./dist/plugin.js",
@@ -29,12 +29,9 @@
     "agents",
     "skills",
     "scripts/install.mjs",
-    "postinstall.mjs",
     "LICENSE"
   ],
   "scripts": {
-    "postinstall": "node postinstall.mjs",
-    "install": "node scripts/install.mjs",
     "release": "node scripts/publish.mjs",
     "release:dry": "node scripts/publish.mjs --dry-run",
     "release:patch": "node scripts/publish.mjs --patch",

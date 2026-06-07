@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/parallax-opencode)](https://www.npmjs.com/package/parallax-opencode)
-[![Tests](https://img.shields.io/badge/tests-99%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-118%20passing-brightgreen)]()
 
 ---
 
@@ -14,9 +14,36 @@
 npx parallax-opencode
 ```
 
-Restart OpenCode. The plugin hooks and tools are auto-loaded.
+This explicit installer copies the Parallax/Horizon agents, copies the packaged
+mode skills, and creates or updates `~/.config/opencode/opencode.json` with the
+`"parallax-opencode"` plugin entry. Restart OpenCode after install.
 
-The plugin stores runtime state at `~/.parallax/` (plugin process runs from user home directory).
+Package installation itself has no lifecycle side effects; `npm install
+parallax-opencode` will not mutate your OpenCode config. Runtime Horizon state is
+stored under `~/.parallax/horizon/`; project-local Parallax traces/state are
+stored under `.parallax/` in the active workspace.
+
+### Update
+
+```bash
+npx parallax-opencode@latest
+```
+
+Restart OpenCode so the updated plugin package and copied agent files are loaded.
+
+### Uninstall
+
+Remove `"parallax-opencode"` from `~/.config/opencode/opencode.json`, then delete
+the copied files if desired:
+
+```bash
+rm -rf ~/.config/opencode/agents/parallax.md \
+       ~/.config/opencode/agents/horizon.md \
+       ~/.config/opencode/skills/parallax-plan \
+       ~/.config/opencode/skills/parallax-debug
+```
+
+On Windows, remove the same paths under `%USERPROFILE%\.config\opencode`.
 
 ---
 
@@ -40,8 +67,8 @@ The Parallax agent follows a structured reasoning protocol before writing code. 
 | Step | Checkin | What it blocks |
 |---|---|---|
 | 1. Ambiguity Check | `parallax_checkin("ambiguity")` | All writes until done |
-| 2. 4 Invariants | `parallax_checkin("invariants")` | Warns after 3 writes without checkin |
-| 3. Verification Gate | `parallax_checkin("gate")` | Requires invariants first |
+| 2. 4 Invariants | `parallax_checkin("invariants")` | All writes until done in default strict mode |
+| 3. Verification Gate | `parallax_checkin("gate")` | All writes until done in default strict mode |
 | 4. Design Doc (opt-in) | `parallax_checkin("design")` | Per project via config |
 | 5. Commit Decision | `parallax_checkin("commit")` | Any time after gate |
 | 6. Summary | `parallax_checkin("summary")` | Generates retrospective |
@@ -78,7 +105,7 @@ Based on [@acidgreenservers AGENTS.md](https://gist.github.com/acidgreenservers/
 
 ### HORIZON AGENT -- Autonomous Long-Horizon Supervisor
 
-The **Horizon** agent is a self-driving project supervisor for multi-hour/multi-day tasks. It plans, researches, executes, self-tests, and self-iterates until a goal is 100% complete without needing mid-execution user input.
+The **Horizon** agent is a prompt-driven project supervisor for multi-hour/multi-day tasks. The plugin provides durable planning, research, decision-log, skill, trace, and evaluation tools; the Horizon agent uses those tools to plan, research, execute, self-test, and self-iterate without mid-execution user input.
 
 #### Workflow
 

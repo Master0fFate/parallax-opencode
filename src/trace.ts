@@ -22,6 +22,7 @@ import type {
   TraceMetrics,
   ProjectType,
 } from "./types.js"
+import { computeCoherenceScore } from "./score.js"
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -165,7 +166,16 @@ export function finalizeTrace(sessionId: string): ParallaxTrace {
   const trace = getTrace(sessionId)
   trace.session.endedAt = new Date().toISOString()
   trace.metrics = computeMetrics(trace)
+  trace.coherenceScore = computeCoherenceScore(trace).total
   return trace
+}
+
+export function writeTraceFile(trace: ParallaxTrace, pretty: boolean = false): string {
+  const dir = getTraceDir()
+  const filePath = join(dir, `${trace.session.id}.json`)
+  const json = pretty ? JSON.stringify(trace, null, 2) : JSON.stringify(trace)
+  writeFileSync(filePath, json, "utf8")
+  return filePath
 }
 
 // ---------------------------------------------------------------------------
@@ -190,11 +200,7 @@ function getTraceDir(): string {
  */
 export function exportTrace(sessionId: string, pretty: boolean = false): string {
   const trace = finalizeTrace(sessionId)
-  const dir = getTraceDir()
-  const filePath = join(dir, `${sessionId}.json`)
-  const json = pretty ? JSON.stringify(trace, null, 2) : JSON.stringify(trace)
-  writeFileSync(filePath, json, "utf8")
-  return filePath
+  return writeTraceFile(trace, pretty)
 }
 
 /**
