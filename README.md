@@ -52,7 +52,7 @@ Only `pass` is passing evidence. `fail`, `skipped`, and `unknown` remain visible
 | **Parallax / DEBUG** | Evidence-led investigation and remediation |
 | **Horizon** | Milestone-based work that must persist and resume across invocations |
 
-Horizon is durable, prompt-driven supervision—not a background daemon or a guarantee of unattended completion. It advances only while OpenCode is running, the agent is active, tools are available, and permissions are granted.
+Horizon is durable, self-iterative supervision—not a background daemon. In full autonomy, an idle-session liveness hook automatically continues while runnable work remains; OpenCode must still be running, and platform permissions/capabilities remain authoritative.
 
 ## Install and lifecycle
 
@@ -169,9 +169,11 @@ Hyperplan generates an optional three-round adversarial review (analysis, cross-
 
 ### Horizon
 
-Horizon is a context-efficient sequential supervisor. For each atomic feature it dispatches only packaged `horizon-worker`, waits for completion and an observed schema-v2 receipt, dispatches only packaged read-only `horizon-auditor`, waits again, then accepts or sends one corrective worker. At most one delegated task is active; overlap and parallel dispatch are forbidden. Full implementation/audit detail remains in child sessions and archived traces while each child returns a structured summary of at most 2,000 characters. A feature is ready only with persisted receipt ID + `pass` verdict evidence and an independent auditor acceptance; evaluator scores cannot set verification or readiness.
+Horizon is a context-efficient sequential supervisor. For each atomic feature it dispatches only packaged `horizon-worker`, waits for completion and an observed schema-v2 receipt, dispatches only packaged read-only `horizon-auditor`, waits again, then accepts or sends a fresh corrective worker. At most one delegated task is active; overlap and parallel dispatch are forbidden. Attempts are not capped: repeated failures persist and rotate recovery through focused correction, replanning, research, and decomposition. Full implementation/audit detail remains in child sessions and archived traces while each child returns a structured summary of at most 2,000 characters. A feature is ready only with persisted receipt ID + `pass` verdict evidence and an independent auditor acceptance; evaluator scores cannot set verification or readiness.
 
-Horizon tools initialize/list/status sessions; read and write plans and state; update features and milestones; append/read decisions; write/read research; create/list session skills; archive traces; persist observed verification/audit evidence; evaluate supplied sub-agent evidence; and read/write Horizon configuration. They persist and score supplied information but do not run continuously or prove correctness.
+In full autonomy, OpenCode's `session.idle` event queues a synthetic continuation turn whenever a Horizon plan still has runnable work. Horizon pauses only for trusted OpenCode cancellation/permission events or a typed, evidence-backed credential, external-service, platform, framework, or structural blocker. Failed checks, timeouts, and old exhausted retry budgets remain runnable recovery inputs. If the original goal includes a verified GitHub/npm release, release work stays in the plan and runs after the gates pass.
+
+Horizon tools initialize/list/status sessions; read and write plans and state; update features and milestones; append/read decisions; write/read research; create/list session skills; archive traces; persist observed verification/audit evidence; evaluate supplied sub-agent evidence; and read/write Horizon configuration. They persist and score supplied information but do not prove correctness; automatic continuation is provided separately by the plugin's idle-session liveness hook.
 
 - Session: `horizon_init_session`, `horizon_list_sessions`, `horizon_session_status`
 - Plan/state: `horizon_write_plan`, `horizon_read_plan`, `horizon_write_state`, `horizon_read_state`

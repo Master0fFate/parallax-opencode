@@ -1,6 +1,6 @@
 {
   "name": "parallax-opencode",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Verified change loop for OpenCode with protocol preflight, bounded checks, durable receipts, mode skills, and resumable long-running supervision",
   "type": "module",
   "main": "./dist/plugin.js",

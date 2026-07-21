@@ -36,7 +36,7 @@ function createTrace(): ParallaxTrace {
     session: {
       id: "test-session",
       agent: "parallax",
-      agentVersion: "0.7.3",
+      agentVersion: "0.7.4",
       startedAt: new Date().toISOString(),
       endedAt: null,
     },

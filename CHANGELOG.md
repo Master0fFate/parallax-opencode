@@ -4,12 +4,18 @@ All notable changes to the Parallax Engine will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-07-21
+
 ### Added
 - Packaged mutation-capable `horizon-worker` and read-only `horizon-auditor` subagents with a strict sequential worker → observed receipt → auditor → accept/corrective-worker pipeline.
 - Durable observed receipt/audit evidence tools and release checks covering installed, packed, and real OpenCode agent discovery.
 
 ### Changed
 - Horizon task permissions now use a last-match allowlist for only the packaged child roles; advisory evaluator scores can no longer set verification passed or readiness.
+- Full-autonomy Horizon no longer has a terminal retry budget. Attempts persist without a cap and rotate through correction, replanning, research, and decomposition.
+- Added an OpenCode `session.idle` liveness hook that queues continuation while runnable Horizon work remains, including explicitly requested release work.
+- Durable pauses now require a typed, evidence-backed external/platform blocker; legacy failed features and untyped retry-exhaustion pauses resume automatically.
+- Legacy `maxRetryCycles` configuration migrates to `recoveryEscalationInterval`, which controls strategy pivots rather than stopping execution.
 - Child models are inherited by default, with optional compatible user overrides documented instead of assuming a portable cheap model.
 
 ## [0.7.3] - 2026-07-21

@@ -57,10 +57,16 @@ vi.mock("fs", () => {
     renameSync: vi.fn((src: string, dst: string) => {
       const srcKey = norm(src)
       const dstKey = norm(dst)
+      if (!mockFs.exists[srcKey]) throw new Error(`File not found: ${srcKey}`)
       mockFs.files[dstKey] = mockFs.files[srcKey] || ""
       mockFs.exists[dstKey] = true
       delete mockFs.files[srcKey]
       delete mockFs.exists[srcKey]
+    }),
+    unlinkSync: vi.fn((p: string) => {
+      const key = norm(p)
+      delete mockFs.files[key]
+      delete mockFs.exists[key]
     }),
   }
 })
@@ -144,7 +150,7 @@ describe("Horizon Config", () => {
   it("loads default config when no file exists", () => {
     const config = horizon.loadHorizonConfig()
     expect(config.autonomyLevel).toBe("full")
-    expect(config.maxRetryCycles).toBe(3)
+    expect(config.recoveryEscalationInterval).toBe(3)
     expect(config.testCommand).toBe("npm test")
   })
 
@@ -153,8 +159,8 @@ describe("Horizon Config", () => {
     expect(() => horizon.validateHorizonConfig([])).toThrow("JSON object")
     expect(() => horizon.saveHorizonConfig({
       ...horizon.loadHorizonConfig(),
-      maxRetryCycles: 0,
-    })).toThrow("maxRetryCycles")
+      recoveryEscalationInterval: 0,
+    })).toThrow("recoveryEscalationInterval")
     expect(() => horizon.validateHorizonConfig({
       ...horizon.loadHorizonConfig(),
       decisionConfidenceThreshold: 2,
@@ -174,16 +180,30 @@ describe("Horizon Config", () => {
     horizon.saveHorizonConfig({
       autonomyLevel: "semi",
       autoApproveMilestones: false,
-      maxRetryCycles: 5,
+      recoveryEscalationInterval: 5,
       decisionConfidenceThreshold: 0.8,
-      pauseOnCriticalFailure: true,
       testCommand: "pnpm test",
       lintCommand: "pnpm lint",
     })
     const config = horizon.loadHorizonConfig()
     expect(config.autonomyLevel).toBe("semi")
-    expect(config.maxRetryCycles).toBe(5)
+    expect(config.recoveryEscalationInterval).toBe(5)
     expect(config.testCommand).toBe("pnpm test")
+  })
+
+  it("migrates legacy retry caps into non-terminal recovery escalation", () => {
+    const config = horizon.validateHorizonConfig({
+      autonomyLevel: "full",
+      autoApproveMilestones: true,
+      maxRetryCycles: 7,
+      pauseOnCriticalFailure: true,
+      decisionConfidenceThreshold: 0.7,
+      testCommand: "npm test",
+      lintCommand: "npm run lint",
+    })
+    expect(config.recoveryEscalationInterval).toBe(7)
+    expect(config).not.toHaveProperty("maxRetryCycles")
+    expect(config).not.toHaveProperty("pauseOnCriticalFailure")
   })
 })
 
@@ -237,6 +257,85 @@ describe("Horizon Plan Read/Write", () => {
     expect(read!.stats.totalFeatures).toBe(2)
   })
 
+  it("merges replanning changes without deleting execution history or omitted features", () => {
+    const existing = makeSamplePlan("test-session")
+    existing.milestones[0].features[0].subAgentSessionId = "worker-1"
+    existing.milestones[0].features[0].attempts = 8
+    existing.milestones[0].features[0].recovery = horizon.getHorizonRecoveryDirective(
+      { attempts: 8 },
+      { ...horizon.loadHorizonConfig(), recoveryEscalationInterval: 3 },
+    )
+    const incoming = makeSamplePlan("test-session")
+    incoming.autonomyLevel = "supervised"
+    incoming.milestones[0].features[0].description = "Illegitimate active relabel"
+    incoming.milestones[0].features[0].status = "pending"
+    incoming.milestones[0].features[0].attempts = 0
+    incoming.milestones[0].features[1].description = "Replanned pending description"
+    incoming.milestones[0].features = [
+      incoming.milestones[0].features[0],
+      incoming.milestones[0].features[1],
+      {
+        ...incoming.milestones[0].features[1],
+        id: "f3",
+        name: "Feature Three",
+        attempts: 0,
+        status: "pending",
+      },
+    ]
+
+    const merged = horizon.mergeHorizonPlanDefinition(existing, incoming)
+    const byId = new Map(merged.milestones[0].features.map((feature) => [feature.id, feature]))
+    expect(byId.get("f1")).toMatchObject({
+      description: "First feature",
+      status: "in_progress",
+      attempts: 8,
+      subAgentSessionId: "worker-1",
+      recovery: { attempt: 8, strategy: "research" },
+    })
+    expect(byId.get("f2")?.description).toBe("Replanned pending description")
+    expect(byId.has("f3")).toBe(true)
+    expect(merged.stats).toMatchObject({ totalFeatures: 3, totalRetries: 8 })
+    expect(merged.autonomyLevel).toBe("full")
+  })
+
+  it("moves features without duplication and keeps receipt-backed briefs immutable", () => {
+    const existing = makeSamplePlan("test-session")
+    const proven = existing.milestones[0].features[0]
+    proven.status = "completed"
+    proven.subAgentSessionId = "worker-1"
+    proven.verification = {
+      passed: true,
+      testResults: "npm test",
+      issues: [],
+      score: null,
+      receiptId: "receipt-1",
+      verdict: "pass",
+    }
+    proven.audit = {
+      verdict: "accept",
+      subAgentSessionId: "auditor-1",
+      traceId: null,
+      summary: "accepted",
+    }
+    const incoming = makeSamplePlan("test-session")
+    const moved = { ...incoming.milestones[0].features[0], acceptanceCriteria: "Changed criteria" }
+    incoming.milestones = [{
+      ...incoming.milestones[0],
+      id: "m2",
+      name: "Moved milestone",
+      features: [moved],
+    }]
+
+    const merged = horizon.mergeHorizonPlanDefinition(existing, incoming)
+    const occurrences = merged.milestones.flatMap((milestone) => milestone.features)
+      .filter((feature) => feature.id === "f1")
+    expect(occurrences).toHaveLength(1)
+    expect(occurrences[0].acceptanceCriteria).toBe("It works")
+    expect(occurrences[0].verification.receiptId).toBe("receipt-1")
+    expect(merged.milestones.flatMap((milestone) => milestone.features).map((feature) => feature.id))
+      .toEqual(expect.arrayContaining(["f1", "f2"]))
+  })
+
   it("returns null for missing plan", () => {
     const plan = horizon.readHorizonPlan("nonexistent")
     expect(plan).toBeNull()
@@ -256,16 +355,18 @@ describe("Horizon Plan Read/Write", () => {
 })
 
 describe("Horizon Feature Updates", () => {
-  it("updates a failed feature status and recalculates stats", () => {
+  it("preserves legacy failed status outside full autonomy but rejects it in full autonomy", () => {
     const plan = makeSamplePlan("test-session")
     horizon.writeHorizonPlan("test-session", plan)
+    expect(() => horizon.updateHorizonFeature("test-session", "f1", { status: "failed" }))
+      .toThrow("cannot terminally fail")
 
+    plan.autonomyLevel = "semi"
+    horizon.writeHorizonPlan("test-session", plan)
     const result = horizon.updateHorizonFeature("test-session", "f1", { status: "failed" })
-
     expect(result).not.toBeNull()
     expect(result!.stats.failedFeatures).toBe(1)
     expect(result!.stats.totalFeatures).toBe(2)
-    expect(result!.milestones[0].features[0].status).toBe("failed")
   })
 
   it("starts exactly one new worker session and increments attempts", () => {
@@ -304,6 +405,66 @@ describe("Horizon Feature Updates", () => {
       status: "in_progress",
       subAgentSessionId: "worker-1",
     })).toThrow("new child session")
+  })
+
+  it("continues beyond legacy caps and rotates adaptive recovery strategies", () => {
+    const plan = makeSamplePlan("test-session")
+    plan.milestones[0].features[0].status = "completed"
+    const feature = plan.milestones[0].features[1]
+    feature.attempts = 100
+    feature.maxAttempts = 1
+    horizon.writeHorizonPlan("test-session", plan)
+
+    const result = horizon.updateHorizonFeature("test-session", "f2", {
+      status: "in_progress",
+      subAgentSessionId: "worker-101",
+    })!
+    const updated = result.milestones[0].features[1]
+    expect(updated.attempts).toBe(101)
+    expect(updated.status).toBe("in_progress")
+    expect(updated.recovery).toMatchObject({ attempt: 101 })
+
+    const config = { ...horizon.loadHorizonConfig(), recoveryEscalationInterval: 3 }
+    expect([1, 4, 7, 10, 13].map((attempts) =>
+      horizon.getHorizonRecoveryDirective({ attempts }, config).strategy,
+    )).toEqual(["correct", "replan", "research", "decompose", "correct"])
+  })
+
+  it("resumes legacy failed features with a fresh worker", () => {
+    const plan = makeSamplePlan("test-session")
+    plan.milestones[0].features[0].status = "failed"
+    plan.milestones[0].features[1].status = "completed"
+    horizon.writeHorizonPlan("test-session", plan)
+    const result = horizon.updateHorizonFeature("test-session", "f1", {
+      status: "in_progress",
+      subAgentSessionId: "worker-resume",
+    })!
+    expect(result.milestones[0].features[0]).toMatchObject({
+      status: "in_progress",
+      subAgentSessionId: "worker-resume",
+      attempts: 2,
+    })
+  })
+
+  it("requires typed evidence before a feature can block", () => {
+    const plan = makeSamplePlan("test-session")
+    horizon.writeHorizonPlan("test-session", plan)
+    expect(() => horizon.updateHorizonFeature("test-session", "f1", {
+      status: "blocked",
+      blocker: { kind: "framework", evidence: "too short", createdAt: new Date().toISOString(), resumable: false },
+    })).toThrow("Blocker evidence")
+
+    const result = horizon.updateHorizonFeature("test-session", "f1", {
+      status: "blocked",
+      blocker: {
+        kind: "framework",
+        evidence: "The framework API cannot represent the required operation and exposes no extension point.",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        resumable: false,
+      },
+    })!
+    expect(result.milestones[0].features[0].status).toBe("blocked")
+    expect(result.stats.totalFeatures).toBe(2)
   })
 
   it("returns null for nonexistent feature", () => {
@@ -377,6 +538,47 @@ describe("Horizon State Read/Write", () => {
   it("returns null for missing state", () => {
     const state = horizon.readHorizonState("nonexistent")
     expect(state).toBeNull()
+  })
+
+  it("requires typed blocker evidence for durable pauses", () => {
+    expect(() => horizon.writeHorizonState("test-session", {
+      sessionId: "test-session",
+      currentPhase: "execute",
+      activeSubAgents: [],
+      currentMilestoneId: "m1",
+      currentFeatureId: "f1",
+      lastCheckpoint: null,
+      pausedAt: "2026-01-01T00:00:00.000Z",
+      pauseReason: "retry exhausted",
+    })).toThrow("typed blocker evidence")
+  })
+
+  it("identifies full-autonomy sessions that require automatic continuation", () => {
+    const plan = makeSamplePlan("test-session")
+    const state: HorizonState = {
+      sessionId: "test-session",
+      currentPhase: "execute",
+      activeSubAgents: [],
+      currentMilestoneId: "m1",
+      currentFeatureId: "f1",
+      lastCheckpoint: null,
+      pausedAt: null,
+      pauseReason: null,
+    }
+    expect(horizon.horizonSessionNeedsContinuation(plan, state)).toBe(true)
+    plan.milestones[0].features.forEach((feature) => { feature.status = "completed" })
+    expect(horizon.horizonSessionNeedsContinuation(plan, state)).toBe(false)
+    plan.status = "completed"
+    expect(horizon.horizonSessionNeedsContinuation(plan, state)).toBe(false)
+    plan.status = "executing"
+    state.pausedAt = "2026-01-01T00:00:00.000Z"
+    state.blocker = {
+      kind: "permissions",
+      evidence: "OpenCode denied the required repository write permission and no writable path exists.",
+      createdAt: state.pausedAt,
+      resumable: true,
+    }
+    expect(horizon.horizonSessionNeedsContinuation(plan, state)).toBe(false)
   })
 
   it("rejects overlapping delegated tasks", () => {
@@ -457,6 +659,9 @@ describe("Horizon sequential evidence pipeline", () => {
       "test-session", "f1", "accept", "auditor-2", "duplicate",
     )).toThrow("already persisted")
 
+    const beforeCompletion = horizon.readHorizonPlan("test-session")!
+    beforeCompletion.milestones[0].features[1].status = "completed"
+    horizon.writeHorizonPlan("test-session", beforeCompletion)
     const completed = horizon.updateHorizonFeature("test-session", "f1", { status: "completed" })!
     expect(completed.milestones[0].features[0]).toMatchObject({
       status: "completed",
@@ -464,6 +669,9 @@ describe("Horizon sequential evidence pipeline", () => {
       verification: { receiptId: "receipt-pass", verdict: "pass", passed: true },
       audit: { verdict: "accept", subAgentSessionId: "auditor-1" },
     })
+    expect(completed.status).toBe("completed")
+    expect(completed.completedAt).not.toBeNull()
+    expect(completed.milestones[0].status).toBe("completed")
   })
 
   it("persists non-pass verdict evidence and bounds child summaries", () => {
@@ -508,6 +716,20 @@ describe("Horizon sequential evidence pipeline", () => {
     expect(feature.verification).toMatchObject({ passed: false, receiptId: null, verdict: null })
     expect(feature.audit).toBeNull()
     expect(feature.subAgentSessionId).toBe("worker-2")
+    expect(feature.attemptHistory).toContainEqual({
+      attempt: 1,
+      workerSessionId: "worker-1",
+      receiptId: "receipt-pass",
+      auditorSessionId: "auditor-1",
+    })
+
+    const persisted = horizon.readHorizonPlan("test-session")!
+    persisted.milestones[0].features[0].status = "completed"
+    horizon.writeHorizonPlan("test-session", persisted)
+    expect(() => horizon.updateHorizonFeature("test-session", "f2", {
+      status: "in_progress",
+      subAgentSessionId: "worker-1",
+    })).toThrow("new child session")
   })
 })
 

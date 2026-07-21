@@ -24,6 +24,7 @@ import type {
   ProtocolState,
   ParallaxConfig,
   HorizonAutonomyLevel,
+  HorizonBlockerKind,
 } from "./types.js"
 import { detectProject } from "./detect.js"
 import { loadEffectiveParallaxConfig } from "./config.js"
@@ -71,6 +72,9 @@ let currentSessionId: string | null = null
 let currentAgentName: string | null = null
 const sessionRootStore = new Map<string, string>()
 const sessionAgentStore = new Map<string, string>()
+const horizonContinuationInFlight = new Set<string>()
+const horizonContinuationOwners = new Map<string, { horizonSessionId: string; owner: string }>()
+const horizonCancelledSessions = new Set<string>()
 
 // Known agent names for case-insensitive matching. Add new agents here.
 const KNOWN_AGENTS = ["parallax", "horizon"] as const
@@ -335,6 +339,32 @@ function getCachedHorizonSessions(): ReturnType<typeof horizon.listHorizonSessio
   horizonSessionsCache = horizon.listHorizonSessions()
   horizonSessionsCacheTime = now
   return horizonSessionsCache
+}
+
+function horizonPlanIsOwned(
+  plan: NonNullable<ReturnType<typeof horizon.readHorizonPlan>>,
+  sid: string,
+  root: string,
+): boolean {
+  const canonicalRoot = resolve(root)
+  return (!plan.workspaceRoot && plan.sessionId === sid) ||
+    (plan.workspaceRoot === canonicalRoot &&
+     (!plan.openCodeSessionId || plan.openCodeSessionId === sid))
+}
+
+function findOwnedHorizonPlan(sid: string, root: string) {
+  const direct = horizon.readHorizonPlan(sid)
+  if (direct && horizonPlanIsOwned(direct, sid, root)) return direct
+  return horizon.listHorizonSessions()
+    .map((entry) => horizon.readHorizonPlan(entry.id))
+    .find((plan) => plan ? horizonPlanIsOwned(plan, sid, root) : false) || null
+}
+
+function assertHorizonSessionAccess(sessionId: string, sid: string, root: string): void {
+  const plan = horizon.readHorizonPlan(sessionId)
+  if (plan && !horizonPlanIsOwned(plan, sid, root)) {
+    throw new Error(`[horizon] Session '${sessionId}' belongs to another OpenCode session or workspace`)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -739,10 +769,10 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
       // MODE: HORIZON
       parallax_horizon: tool({
         description:
-          "Switch to HORIZON mode for durable long-running supervision with " +
-          "persisted plans, bounded retries, verification receipts, and resumable state. " +
-          "Horizon advances while OpenCode is running and permissions are granted; " +
-          "it is not a background daemon or a completion guarantee.",
+          "Switch to HORIZON mode for durable full-autonomy supervision with " +
+          "persisted plans, adaptive recovery, verification receipts, and resumable state. " +
+          "While OpenCode is running, full autonomy automatically continues every runnable " +
+          "feature and pauses only for a typed, evidence-backed hard blocker.",
         args: {},
         async execute(_args, context?: ToolContext) {
           const { sid, root } = toolRuntime(context)
@@ -753,7 +783,8 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
           return (
             "[parallax] HORIZON mode activated for durable supervision. " +
             "Work will follow PREFLIGHT -> CHANGE -> VERIFY -> RECEIPT with " +
-            "bounded retries, persisted state, and OpenCode permissions respected."
+            "unbounded adaptive recovery, automatic continuation, persisted state, " +
+            "and OpenCode permissions respected."
           )
         },
       }),
@@ -769,40 +800,45 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
           "and index entry. Creates the full directory tree: research/, skills/, traces/. " +
           "Call this at the start of a Horizon task.",
         args: {
-          sessionId: tool.schema.string().describe(
-            "Unique session ID (e.g., 'session-001')",
+          sessionId: tool.schema.string().optional().describe(
+            "Optional durable Horizon ID. Defaults to the current OpenCode session ID so autopilot is attached safely.",
           ),
           goal: tool.schema.string().describe(
             "The user's original goal statement",
           ),
           autonomyLevel: tool.schema.string().optional().describe(
-            "Autonomy level: full, semi, or supervised (default: full)",
+            "Autonomy level: full, semi, or supervised (defaults to Horizon config)",
           ),
         },
         async execute(args: {
-          sessionId: string
+          sessionId?: string
           goal: string
           autonomyLevel?: string
-        }) {
+        }, context?: ToolContext) {
           const level = (
-            args.autonomyLevel || "full"
+            args.autonomyLevel || horizon.loadHorizonConfig().autonomyLevel
           ) as HorizonAutonomyLevel
           if (!["full", "semi", "supervised"].includes(level)) {
             return "[horizon] ERROR: autonomyLevel must be 'full', 'semi', or 'supervised'."
           }
-          horizon.initHorizonSession(args.sessionId, args.goal, level)
+          const runtime = toolRuntime(context)
+          const horizonSessionId = args.sessionId?.trim() || runtime.sid
+          horizon.initHorizonSession(horizonSessionId, args.goal, level, {
+            openCodeSessionId: runtime.sid,
+            workspaceRoot: runtime.root,
+          })
           client.app.log({
             body: {
               service: "horizon",
               level: "info",
-              message: `[horizon] Session '${args.sessionId}' initialized. Goal: ${args.goal.slice(0, 80)}`,
+              message: `[horizon] Session '${horizonSessionId}' initialized. Goal: ${args.goal.slice(0, 80)}`,
             },
           }).catch(() => {})
           return (
-            `[horizon] Session initialized: ${args.sessionId}\n` +
+            `[horizon] Session initialized: ${horizonSessionId}\n` +
             `Goal: ${args.goal.slice(0, 120)}\n` +
             `Autonomy: ${level}\n` +
-            `Directory: ~/.parallax/horizon/sessions/${args.sessionId}/`
+            `Directory: ~/.parallax/horizon/sessions/${horizonSessionId}/`
           )
         },
       }),
@@ -834,30 +870,45 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
             if (plan.sessionId !== args.sessionId || !["planning", "executing"].includes(plan.status)) {
               return "[horizon] ERROR: Plan identity/status is invalid for the planning surface."
             }
+            const milestoneIds = plan.milestones.map((milestone: { id?: unknown }) => String(milestone.id || ""))
+            if (milestoneIds.some((id: string) => !id) || new Set(milestoneIds).size !== milestoneIds.length) {
+              return "[horizon] ERROR: Plan milestone IDs must be present and globally unique."
+            }
             const features = plan.milestones.flatMap(
               (milestone: { features?: unknown[] }) => Array.isArray(milestone.features) ? milestone.features : [],
             ) as Array<Record<string, any>>
-            const retryCap = horizon.loadHorizonConfig().maxRetryCycles
-            const invalidFeature = features.find((feature) =>
-              feature.status !== "pending" || feature.attempts !== 0 || feature.subAgentSessionId != null ||
-              feature.workerSummary != null || feature.audit != null || feature.verification?.passed !== false ||
-              feature.verification?.receiptId != null || feature.verification?.verdict != null ||
-              !Number.isInteger(feature.maxAttempts) || feature.maxAttempts < 1 || feature.maxAttempts > retryCap)
-            if (invalidFeature) {
+            const ids = features.map((feature) => String(feature.id || ""))
+            if (ids.some((id) => !id) || new Set(ids).size !== ids.length) {
+              return "[horizon] ERROR: Plan feature IDs must be present and globally unique."
+            }
+            const existingPlan = horizon.readHorizonPlan(args.sessionId)
+            const existingIds = new Set(existingPlan?.milestones.flatMap((milestone) =>
+              milestone.features.map((feature) => feature.id)) || [])
+            const invalidNewFeature = features.find((feature) =>
+              !existingIds.has(String(feature.id)) &&
+              (feature.status !== "pending" || feature.attempts !== 0 || feature.subAgentSessionId != null ||
+               feature.workerSummary != null || feature.audit != null || feature.recovery != null ||
+               (Array.isArray(feature.attemptHistory) && feature.attemptHistory.length > 0) ||
+               feature.blocker != null || feature.verification?.passed !== false ||
+               feature.verification?.receiptId != null || feature.verification?.verdict != null))
+            if (invalidNewFeature) {
               return (
-                `[horizon] ERROR: Plan feature '${String(invalidFeature.id || "unknown")}' contains execution/evidence state. ` +
-                "Use the feature, receipt, and audit transition tools; planning cannot manufacture readiness."
+                `[horizon] ERROR: New plan feature '${String(invalidNewFeature.id || "unknown")}' contains execution/evidence state. ` +
+                "Planning cannot manufacture readiness."
               )
             }
-            if (!plan.stats || plan.stats.completedFeatures !== 0 || plan.stats.failedFeatures !== 0 ||
-                plan.stats.totalRetries !== 0 || plan.stats.totalFeatures !== features.length) {
+            if (!plan.stats) return "[horizon] ERROR: Plan stats are required."
+            const hasExecutionHistory = existingIds.size > 0
+            if (!hasExecutionHistory &&
+                (plan.stats.completedFeatures !== 0 || plan.stats.failedFeatures !== 0 ||
+                 plan.stats.totalRetries !== 0 || plan.stats.totalFeatures !== features.length)) {
               return "[horizon] ERROR: Initial plan statistics must describe pending features only."
             }
-            horizon.writeHorizonPlan(args.sessionId, plan)
-            const featureCount = features.length
+            const persistedPlan = horizon.updateHorizonPlanDefinition(args.sessionId, plan)
+            const featureCount = persistedPlan.stats.totalFeatures
             return (
               `[horizon] Plan written for session: ${args.sessionId}\n` +
-              `Milestones: ${plan.milestones.length}, Features: ${featureCount}`
+              `Milestones: ${persistedPlan.milestones.length}, Features: ${featureCount}`
             )
           } catch (e) {
             return `[horizon] ERROR: Invalid JSON in planJson -- ${String(e)}`
@@ -908,10 +959,19 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
             "Feature ID to update (e.g., 'feat-001')",
           ),
           status: tool.schema.string().describe(
-            "New status: pending, in_progress, completed, or failed",
+            "New status: pending, in_progress, completed, failed (legacy non-full mode), or blocked",
           ),
           subAgentSessionId: tool.schema.string().optional().describe(
             "Sub-agent session ID if one was dispatched",
+          ),
+          blockerKind: tool.schema.string().optional().describe(
+            "For blocked only: credentials, external-service, platform, framework, or structural. Permission/cancellation blockers come from trusted OpenCode events.",
+          ),
+          blockerEvidence: tool.schema.string().optional().describe(
+            "For blocked only: concrete evidence that no runnable recovery path remains",
+          ),
+          blockerResumable: tool.schema.boolean().optional().describe(
+            "Whether the blocker can be resumed after its external condition changes (default true)",
           ),
         },
         async execute(args: {
@@ -919,8 +979,11 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
           featureId: string
           status: string
           subAgentSessionId?: string
+          blockerKind?: string
+          blockerEvidence?: string
+          blockerResumable?: boolean
         }) {
-          const validStatuses = ["pending", "in_progress", "completed", "failed"]
+          const validStatuses = ["pending", "in_progress", "completed", "failed", "blocked"]
           if (!validStatuses.includes(args.status)) {
             return (
               `[horizon] ERROR: Invalid status '${args.status}'. ` +
@@ -939,11 +1002,29 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
           if (args.status !== "in_progress" && args.subAgentSessionId) {
             return "[horizon] ERROR: A child worker session ID is accepted only when starting an in-progress worker stage."
           }
+          if (args.status === "blocked" && (!args.blockerKind || !args.blockerEvidence)) {
+            return "[horizon] ERROR: A blocked feature requires blockerKind and concrete blockerEvidence."
+          }
+          if (args.status === "blocked" && ["user-cancelled", "permissions"].includes(args.blockerKind || "")) {
+            return "[horizon] ERROR: user-cancelled and permissions blockers can be created only by trusted OpenCode events."
+          }
+          if (args.status !== "blocked" && (args.blockerKind || args.blockerEvidence || args.blockerResumable !== undefined)) {
+            return "[horizon] ERROR: Blocker fields are accepted only with blocked status."
+          }
           if (args.status === "completed" && !horizon.horizonFeatureIsReady(currentFeature)) {
             return "[horizon] ERROR: Feature readiness requires an observed pass receipt and an independent horizon-auditor accept verdict."
           }
           const updates: Record<string, unknown> = { status: args.status }
           if (args.status === "in_progress") updates.subAgentSessionId = args.subAgentSessionId
+          if (args.status === "blocked") {
+            updates.blocker = {
+              kind: args.blockerKind as HorizonBlockerKind,
+              evidence: args.blockerEvidence,
+              createdAt: new Date().toISOString(),
+              resumable: args.blockerResumable ?? true,
+              source: "tool",
+            }
+          }
           let result
           try {
             result = horizon.updateHorizonFeature(
@@ -956,6 +1037,39 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
           }
           if (!result) {
             return `[horizon] Feature '${args.featureId}' not found in session ${args.sessionId}.`
+          }
+
+          const updatedFeature = result.milestones.flatMap((milestone) => milestone.features)
+            .find((feature) => feature.id === args.featureId)!
+          if (args.status === "blocked") {
+            const existingState = horizon.readHorizonState(args.sessionId) || {
+              sessionId: args.sessionId,
+              currentPhase: "execute" as const,
+              activeSubAgents: [],
+              currentMilestoneId: null,
+              currentFeatureId: args.featureId,
+              lastCheckpoint: null,
+              pausedAt: null,
+              pauseReason: null,
+            }
+            horizon.writeHorizonState(args.sessionId, {
+              ...existingState,
+              activeSubAgents: [],
+              currentFeatureId: args.featureId,
+              pausedAt: updatedFeature.blocker!.createdAt,
+              pauseReason: updatedFeature.blocker!.evidence,
+              blocker: updatedFeature.blocker,
+            })
+          } else if (args.status === "pending" && currentFeature.status === "blocked") {
+            const existingState = horizon.readHorizonState(args.sessionId)
+            if (existingState) {
+              horizon.writeHorizonState(args.sessionId, {
+                ...existingState,
+                pausedAt: null,
+                pauseReason: null,
+                blocker: null,
+              })
+            }
           }
 
           // Progress reporting
@@ -973,9 +1087,13 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
             },
           }).catch(() => {})
 
+          const recovery = updatedFeature.recovery
+            ? `\nRecovery: attempt ${updatedFeature.recovery.attempt}, strategy ${updatedFeature.recovery.strategy}\n${updatedFeature.recovery.directive}`
+            : ""
           return (
             `[horizon] Feature '${args.featureId}' updated to '${args.status}'\n` +
-            `Progress: ${result.stats.completedFeatures}/${result.stats.totalFeatures} (${pct}%)`
+            `Progress: ${result.stats.completedFeatures}/${result.stats.totalFeatures} (${pct}%)` +
+            recovery
           )
         },
       }),
@@ -1000,8 +1118,20 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
           workerSummary?: string
         }, context?: ToolContext) {
           const { root } = toolRuntime(context)
-          const receipt = readVerificationLedger(root).receipts.find((candidate) => candidate.id === args.receiptId)
+          const receipts = readVerificationLedger(root).receipts
+          const receipt = receipts.find((candidate) => candidate.id === args.receiptId)
           if (!receipt) return `[horizon] ERROR: Receipt '${args.receiptId}' was not observed in the workspace schema-v2 ledger.`
+          const feature = horizon.readHorizonPlan(args.sessionId)?.milestones
+            .flatMap((milestone) => milestone.features)
+            .find((candidate) => candidate.id === args.featureId)
+          const currentWorkerReceipts = feature?.subAgentSessionId
+            ? receipts.filter((candidate) => candidate.sessionId === feature.subAgentSessionId)
+              .sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt))
+            : []
+          const latestWorkerReceipt = currentWorkerReceipts.at(-1)
+          if (latestWorkerReceipt && latestWorkerReceipt.id !== receipt.id) {
+            return `[horizon] ERROR: Receipt '${receipt.id}' is stale; latest current-worker receipt is '${latestWorkerReceipt.id}'.`
+          }
           try {
             const result = horizon.recordHorizonVerificationReceipt(
               args.sessionId,
@@ -1125,6 +1255,15 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
               pauseReason: null,
             }
             const merged = { ...existing, ...updates, sessionId: args.sessionId }
+            if (updates.pausedAt && !updates.blocker) {
+              throw new Error("A durable pause requires a typed blocker with evidence")
+            }
+            // Legacy retry-exhaustion pauses had no typed blocker. They are
+            // intentionally resumed instead of surviving as terminal state.
+            if (merged.pausedAt && !merged.blocker) {
+              merged.pausedAt = null
+              merged.pauseReason = null
+            }
             horizon.writeHorizonState(args.sessionId, merged)
             return (
               `[horizon] State updated for session: ${args.sessionId}\n` +
@@ -1395,11 +1534,15 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
       // HORIZON LIST SESSIONS
       horizon_list_sessions: tool({
         description:
-          "List all Horizon sessions from the index. Returns UUID, goal, " +
-          "status, autonomy level, and creation date for each session.",
+          "List Horizon sessions owned by the current OpenCode session/workspace. " +
+          "Returns UUID, goal, status, autonomy level, and creation date.",
         args: {},
-        async execute() {
-          const sessions = horizon.listHorizonSessions()
+        async execute(_args, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
+          const sessions = horizon.listHorizonSessions().filter((session) => {
+            const plan = horizon.readHorizonPlan(session.id)
+            return plan ? horizonPlanIsOwned(plan, sid, root) : false
+          })
           if (sessions.length === 0) {
             return "[horizon] No sessions found."
           }
@@ -1562,9 +1705,9 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
         args: {
           configJson: tool.schema.string().optional().describe(
             "Optional JSON string with config fields to set. Fields: " +
-            "autonomyLevel, autoApproveMilestones, maxRetryCycles, " +
-            "decisionConfidenceThreshold, pauseOnCriticalFailure, " +
-            "testCommand, lintCommand.",
+            "autonomyLevel, autoApproveMilestones, recoveryEscalationInterval, " +
+            "decisionConfidenceThreshold, testCommand, lintCommand. Legacy " +
+            "maxRetryCycles is migrated to the escalation interval and never caps attempts.",
           ),
         },
         async execute(args: { configJson?: string }) {
@@ -1575,12 +1718,17 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
                 throw new Error("configJson must contain a JSON object")
               }
               const existing = horizon.loadHorizonConfig()
-              const merged = { ...existing, ...updates }
+              const mergedInput: Record<string, unknown> = { ...existing, ...(updates as Record<string, unknown>) }
+              if (Object.hasOwn(updates as object, "maxRetryCycles") &&
+                  !Object.hasOwn(updates as object, "recoveryEscalationInterval")) {
+                mergedInput.recoveryEscalationInterval = (updates as Record<string, unknown>).maxRetryCycles
+              }
+              const merged = horizon.validateHorizonConfig(mergedInput)
               horizon.saveHorizonConfig(merged)
               return (
                 `[horizon] Config updated:\n` +
                 `  autonomyLevel: ${merged.autonomyLevel}\n` +
-                `  maxRetryCycles: ${merged.maxRetryCycles}\n` +
+                `  recoveryEscalationInterval: ${merged.recoveryEscalationInterval}\n` +
                 `  testCommand: ${merged.testCommand}\n` +
                 `  lintCommand: ${merged.lintCommand}`
               )
@@ -1593,9 +1741,8 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
             `[horizon] Current config:\n` +
             `  autonomyLevel: ${config.autonomyLevel}\n` +
             `  autoApproveMilestones: ${config.autoApproveMilestones}\n` +
-            `  maxRetryCycles: ${config.maxRetryCycles}\n` +
+            `  recoveryEscalationInterval: ${config.recoveryEscalationInterval}\n` +
             `  decisionConfidenceThreshold: ${config.decisionConfidenceThreshold}\n` +
-            `  pauseOnCriticalFailure: ${config.pauseOnCriticalFailure}\n` +
             `  testCommand: ${config.testCommand}\n` +
             `  lintCommand: ${config.lintCommand}`
           )
@@ -2097,8 +2244,14 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
       input: { tool: string; sessionID: string; callID: string },
       output: { args: Record<string, unknown> },
     ) => {
-      if (!["write", "edit", "apply_patch"].includes(input.tool)) return
       const { sid, root } = activateSession(input.sessionID || "current")
+      if (input.tool.startsWith("horizon_") && input.tool !== "horizon_config") {
+        const requestedSessionId = output.args.sessionId
+        if (typeof requestedSessionId === "string" && requestedSessionId.trim()) {
+          assertHorizonSessionAccess(requestedSessionId, sid, root)
+        }
+      }
+      if (!["write", "edit", "apply_patch"].includes(input.tool)) return
       // OpenCode exposes mutable tool arguments exclusively on output.args.
       // Reading input.args here would bypass mutations made by earlier hooks.
       const args = output.args
@@ -2253,12 +2406,33 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
     // Message/event hooks: track the real session and active agent
     // -----------------------------------------------------------------------
 
-    "chat.message": async (input: { sessionID: string; agent?: string }) => {
-      const { sid } = activateSession(input.sessionID)
+    "chat.message": async (
+      input: { sessionID: string; agent?: string },
+      output: { parts?: Array<{ type?: string; synthetic?: boolean }> },
+    ) => {
+      const { sid, root } = activateSession(input.sessionID)
       const agent = normalizeAgentName(input.agent)
       if (agent) {
         currentAgentName = agent
         sessionAgentStore.set(sid, agent)
+        if (agent === "horizon") {
+          getMode(sid).mode = "horizon"
+          writeState(true, sid, root)
+        }
+      }
+      const synthetic = Boolean(output.parts?.length) && output.parts!.every((part) => part.synthetic === true)
+      if (!synthetic) {
+        horizonCancelledSessions.delete(sid)
+        const plan = findOwnedHorizonPlan(sid, root)
+        const state = plan ? horizon.readHorizonState(plan.sessionId) : null
+        if (state?.blocker?.kind === "user-cancelled") {
+          horizon.writeHorizonState(plan!.sessionId, {
+            ...state,
+            pausedAt: null,
+            pauseReason: null,
+            blocker: null,
+          })
+        }
       }
     },
 
@@ -2271,6 +2445,7 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
         const createdSessionId =
           (info.id as string) ||
           (props.sessionID as string) ||
+          (props.sessionId as string) ||
           (info.sessionID as string) ||
           null
         const eventRoot = (info.worktree as string) || (info.directory as string) || pluginRoot
@@ -2281,14 +2456,134 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
         currentAgentName = normalizeAgentName(
           (info.agent as string) || (props.agent as string)
         )
-        if (createdSessionId && currentAgentName) sessionAgentStore.set(createdSessionId, currentAgentName)
+        if (createdSessionId && currentAgentName) {
+          sessionAgentStore.set(createdSessionId, currentAgentName)
+        }
 
         // Initialize trace with session info
         if (createdSessionId) {
           const root = rootForSession(createdSessionId, eventRoot)
           syncStateFromDisk(createdSessionId, root)
+          if (currentAgentName === "horizon") getMode(createdSessionId).mode = "horizon"
           initTrace(createdSessionId, root, detectProject(root))
           writeState(false, createdSessionId, root)
+        }
+      }
+
+      if (input.event.type === "session.error") {
+        const props = input.event.properties || {}
+        const sid = sessionId((props.sessionID || props.sessionId) as string | undefined)
+        const error = props.error as { name?: string; data?: { message?: string } } | undefined
+        if (error?.name === "MessageAbortedError") {
+          horizonCancelledSessions.add(sid)
+          const root = rootForSession(sid, pluginRoot)
+          const plan = findOwnedHorizonPlan(sid, root)
+          const state = plan ? horizon.readHorizonState(plan.sessionId) : null
+          if (plan && state) {
+            const createdAt = new Date().toISOString()
+            const cancellationEvidence = error.data?.message
+              ? `The user cancelled the active Horizon turn: ${error.data.message}`
+              : "The user explicitly cancelled the active Horizon turn; resume requires new user input."
+            horizon.writeHorizonState(plan.sessionId, {
+              ...state,
+              activeSubAgents: [],
+              pausedAt: createdAt,
+              pauseReason: cancellationEvidence,
+              blocker: {
+                kind: "user-cancelled",
+                evidence: cancellationEvidence,
+                createdAt,
+                resumable: true,
+                source: "session-error",
+              },
+            })
+          }
+          const lease = horizonContinuationOwners.get(sid)
+          if (lease) horizon.releaseHorizonContinuationLease(lease.horizonSessionId, lease.owner)
+          horizonContinuationOwners.delete(sid)
+        }
+      }
+
+      if (input.event.type === "permission.replied") {
+        const props = input.event.properties || {}
+        const sid = sessionId((props.sessionID || props.sessionId) as string | undefined)
+        const root = rootForSession(sid, pluginRoot)
+        const plan = findOwnedHorizonPlan(sid, root)
+        const state = plan ? horizon.readHorizonState(plan.sessionId) : null
+        if (props.response === "reject" && plan && state) {
+          const createdAt = new Date().toISOString()
+          const evidence = `OpenCode permission '${String(props.permissionID || "unknown")}' was explicitly rejected by the user.`
+          horizon.writeHorizonState(plan.sessionId, {
+            ...state,
+            activeSubAgents: [],
+            pausedAt: createdAt,
+            pauseReason: evidence,
+            blocker: {
+              kind: "permissions",
+              evidence,
+              createdAt,
+              resumable: true,
+              source: "permission-event",
+            },
+          })
+        } else if ((props.response === "once" || props.response === "always") &&
+                   plan && state?.blocker?.kind === "permissions") {
+          horizon.writeHorizonState(plan.sessionId, {
+            ...state,
+            pausedAt: null,
+            pauseReason: null,
+            blocker: null,
+          })
+        }
+      }
+
+      if (input.event.type === "session.idle") {
+        const props = input.event.properties || {}
+        const sid = sessionId((props.sessionID || props.sessionId) as string | undefined)
+        const root = rootForSession(sid, pluginRoot)
+        const previousLease = horizonContinuationOwners.get(sid)
+        if (previousLease) {
+          horizon.releaseHorizonContinuationLease(previousLease.horizonSessionId, previousLease.owner)
+          horizonContinuationOwners.delete(sid)
+        }
+        syncStateFromDisk(sid, root)
+        if (getMode(sid).mode === "horizon" && isAgent("horizon", sid) &&
+            !horizonCancelledSessions.has(sid) && !horizonContinuationInFlight.has(sid)) {
+          const candidatePlan = findOwnedHorizonPlan(sid, root)
+          const state = candidatePlan ? horizon.readHorizonState(candidatePlan.sessionId) : null
+          if (candidatePlan && horizon.horizonSessionNeedsContinuation(candidatePlan, state)) {
+            const owner = `${process.pid}:${sid}:${randomUUID()}`
+            if (!horizon.acquireHorizonContinuationLease(candidatePlan.sessionId, owner)) return
+            horizonContinuationOwners.set(sid, { horizonSessionId: candidatePlan.sessionId, owner })
+            horizonContinuationInFlight.add(sid)
+            try {
+              await client.session.promptAsync({
+                path: { id: sid },
+                query: { directory: root },
+                body: {
+                  agent: "horizon",
+                  parts: [{
+                    type: "text",
+                    synthetic: true,
+                    text: `[HORIZON AUTOPILOT] Continue session ${candidatePlan.sessionId} now. Do not stop at a failed attempt or ask whether to continue. Inspect durable state, apply the persisted recovery strategy, and advance the next runnable feature through worker, observed receipt, and independent audit. Pause only for a typed evidence-backed hard blocker; otherwise continue through final integration and any release requested by the original goal.`,
+                  }],
+                },
+                throwOnError: true,
+              })
+            } catch (error) {
+              horizon.releaseHorizonContinuationLease(candidatePlan.sessionId, owner)
+              horizonContinuationOwners.delete(sid)
+              client.app.log({
+                body: {
+                  service: "horizon",
+                  level: "error",
+                  message: `[horizon] Automatic continuation failed for '${sid}': ${String(error)}`,
+                },
+              }).catch(() => {})
+            } finally {
+              horizonContinuationInFlight.delete(sid)
+            }
+          }
         }
       }
 
@@ -2297,7 +2592,15 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
         const props = input.event.properties as Record<string, unknown> | undefined
         const sid = sessionId((props?.sessionID || props?.sessionId) as string | undefined)
         currentAgentName = normalizeAgentName(props?.agent as string)
-        if (currentAgentName) sessionAgentStore.set(sid, currentAgentName)
+        if (currentAgentName) {
+          sessionAgentStore.set(sid, currentAgentName)
+          if (currentAgentName === "horizon") {
+            const root = rootForSession(sid, pluginRoot)
+            syncStateFromDisk(sid, root)
+            getMode(sid).mode = "horizon"
+            writeState(true, sid, root)
+          }
+        }
       }
 
     },
@@ -2389,35 +2692,37 @@ export const plugin: Plugin = async ({ client, directory, worktree }) => {
         if (m.mode === "horizon") {
           sys.push(
             "\n## HORIZON VERIFIED CHANGE LOOP\n\n" +
-            "Horizon provides durable, prompt-driven supervision; it is not a background daemon or a completion guarantee.\n\n" +
+            "Horizon full autonomy is a durable self-iterative loop. While OpenCode is running, an idle liveness hook automatically queues continuation whenever runnable work remains. It is not an operating-system background daemon and cannot bypass a stopped process or unavailable platform.\n\n" +
             "### PREFLIGHT\n" +
             "Read repository instructions, current code/tests, and resumable state. Classify ambiguity. Ask only when an essential decision cannot be derived safely from evidence or user-only access blocks work; bundle related questions. OpenCode permission prompts are authoritative and autonomy settings do not bypass ask or deny. Complete ambiguity, invariants, and gate check-ins before project writes.\n\n" +
             "### CHANGE\n" +
-            "For every atomic feature, dispatch one horizon-worker and wait; observe and persist its schema-v2 receipt ID/verdict; dispatch one read-only horizon-auditor and wait; then accept only with an observed pass plus auditor accept, otherwise use one corrective worker within the retry budget. At most one task is active: overlap, parallel dispatch, generic roles, and worker self-audit are forbidden. Keep detail in child traces and return only bounded structured summaries.\n\n" +
+            "For every atomic feature, dispatch one horizon-worker and wait; observe and persist its schema-v2 receipt ID/verdict; dispatch one read-only horizon-auditor and wait; then accept only with an observed pass plus auditor accept. Otherwise immediately dispatch a fresh corrective worker and continue without an attempt cap. Follow the persisted adaptive strategy: focused correction, then replan, research, and decomposition as failures repeat; never repeat an unchanged attempt. At most one task is active: overlap, parallel dispatch, generic roles, and worker self-audit are forbidden. Keep detail in child traces and return only bounded structured summaries.\n\n" +
             "### VERIFY\n" +
             "Persist the observed schema-v2 receipt with horizon_record_verification before auditing. Only pass is passing evidence; fail, skipped, and unknown remain limitations. Self-reported scores and audit recommendations never replace receipt evidence or set readiness.\n\n" +
             "### RECEIPT\n" +
-            "Persist and report changed files, acceptance status, exact checks and verdicts, receipt IDs, decisions, and residual risk. Separate completed, failed, skipped, and blocked work, and identify resumable state.\n\n" +
-            "Discover tools from the current session rather than assuming an MCP or browser exists. State is under ~/.parallax/horizon/sessions/<id>/ and advances only while OpenCode is running and permissions are granted.",
+            "Persist and report changed files, acceptance status, exact checks and verdicts, receipt IDs, decisions, and residual risk. In full autonomy, do not emit a final handoff while runnable work remains. A durable pause requires either a trusted OpenCode cancellation/permission event or horizon_update_feature blocked with concrete evidence that credentials, an external service, or a platform/framework/structural limit prevents further progress. Failed checks, timeouts, low scores, and exhausted prior budgets are recovery inputs, not blockers. If the original goal requests commit, GitHub push, tagging, or package publication, keep those as runnable release features after all gates pass.\n\n" +
+            "Discover tools from the current session rather than assuming an MCP or browser exists. State is under ~/.parallax/horizon/sessions/<id>/ and advances while OpenCode is running and permissions are granted.",
           )
 
           // SESSION RESTART RECOVERY: detect existing sessions for resume
           const hSessions = getCachedHorizonSessions()
-          const activeSessions = hSessions.filter(
-            (s) => s.meta.status === "executing" || s.meta.status === "planning",
-          )
-          if (activeSessions.length > 0) {
-            const latest = activeSessions[activeSessions.length - 1]
-            const hPlan = horizon.readHorizonPlan(latest.id)
-            const hState = horizon.readHorizonState(latest.id)
-            if (hPlan && hState) {
+          const activePlans = hSessions
+            .filter((s) => s.meta.status === "executing" || s.meta.status === "planning" || s.meta.status === "failed")
+            .map((session) => horizon.readHorizonPlan(session.id))
+            .filter((plan) => plan &&
+              ((!plan.workspaceRoot && plan.sessionId === sid) ||
+               (plan.workspaceRoot === root && plan.openCodeSessionId === sid)))
+          if (activePlans.length > 0) {
+            const hPlan = activePlans[activePlans.length - 1]!
+            const hState = horizon.readHorizonState(hPlan.sessionId)
+            if (hState) {
               const pct = hPlan.stats.totalFeatures > 0
                 ? Math.round((hPlan.stats.completedFeatures / hPlan.stats.totalFeatures) * 100)
                 : 0
               sys.push(
                 "\n## SESSION RESTART DETECTED\n\n" +
                 `An existing session was found. You may resume it:\n\n` +
-                `Session: ${latest.id}\n` +
+                `Session: ${hPlan.sessionId}\n` +
                 `Goal: ${hPlan.goal.slice(0, 120)}\n` +
                 `Status: ${hPlan.status}\n` +
                 `Phase: ${hState.currentPhase}\n` +

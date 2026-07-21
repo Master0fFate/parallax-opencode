@@ -145,6 +145,22 @@ describe("unified product and prompt contract", () => {
     }
   })
 
+  it("enforces full-autonomy liveness without weakening evidence or permissions", () => {
+    const horizonAgent = read("agents/horizon.md")
+    const plugin = read("src/plugin.ts")
+    const spec = read("Horizons.spec.md")
+    for (const text of [horizonAgent, plugin, spec]) {
+      expect(text).toMatch(/without an attempt cap|never caps attempts|no terminal retry budget|not an attempt cap/i)
+      expect(text).toMatch(/typed[^\n]*blocker|blocker[^\n]*evidence|records concrete evidence/i)
+      expect(text).toMatch(/OpenCode permission/i)
+    }
+    expect(plugin).toContain('input.event.type === "session.idle"')
+    expect(plugin).toContain("client.session.promptAsync")
+    expect(plugin).toMatch(/Failed checks, timeouts, low scores[\s\S]*recovery inputs, not blockers/i)
+    expect(horizonAgent).toMatch(/do not ask whether to continue/i)
+    expect(horizonAgent).toMatch(/GitHub[\s\S]*publishing a package/i)
+  })
+
   it("keeps advanced planning, debugging, and delegation progressively disclosed", () => {
     expect(read("agents/parallax.md")).toContain("progressive disclosure")
     expect(read("skills/parallax-plan/SKILL.md")).toMatch(/progressively add/i)
@@ -173,7 +189,7 @@ describe("unified product and prompt contract", () => {
     for (const name of toolNames) expect(readme).toContain(name)
 
     expect(read("Horizons.spec.md")).toContain(
-      "These tools persist and score supplied information. They do not themselves run continuously, dispatch sub-agents, or prove correctness.",
+      "These tools persist and score supplied information. They do not dispatch sub-agents or prove correctness.",
     )
     expect(readme).toContain(
       "The `strictness` setting changes how early the runtime blocks a non-compliant write; it does not define a different agent workflow.",

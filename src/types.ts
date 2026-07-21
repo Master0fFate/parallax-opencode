@@ -194,9 +194,9 @@ export type HorizonAutonomyLevel = "full" | "semi" | "supervised"
 
 export type HorizonPhase = "research" | "plan" | "execute" | "audit" | "complete"
 
-export type HorizonPlanStatus = "planning" | "executing" | "completed" | "failed"
+export type HorizonPlanStatus = "planning" | "executing" | "completed" | "failed" | "blocked"
 
-export type HorizonItemStatus = "pending" | "in_progress" | "completed" | "failed"
+export type HorizonItemStatus = "pending" | "in_progress" | "completed" | "failed" | "blocked"
 
 export type HorizonProtocolLevel = "full"
 
@@ -204,9 +204,48 @@ export type HorizonVerificationVerdict = "pass" | "fail" | "skipped" | "unknown"
 
 export type HorizonAuditVerdict = "accept" | "corrective-worker"
 
+export type HorizonRecoveryStrategy = "correct" | "replan" | "research" | "decompose"
+
+export type HorizonBlockerKind =
+  | "credentials"
+  | "permissions"
+  | "external-service"
+  | "platform"
+  | "framework"
+  | "structural"
+  | "user-cancelled"
+
+export interface HorizonBlocker {
+  kind: HorizonBlockerKind
+  evidence: string
+  createdAt: string
+  resumable: boolean
+  /** Trusted event provenance when available; legacy blockers may omit it. */
+  source?: "tool" | "session-error" | "permission-event" | "runtime"
+}
+
+export interface HorizonRecoveryDirective {
+  attempt: number
+  startedAt: string
+  cycle: number
+  strategy: HorizonRecoveryStrategy
+  directive: string
+}
+
+export interface HorizonAttemptRecord {
+  attempt: number
+  workerSessionId: string
+  receiptId: string | null
+  auditorSessionId: string | null
+}
+
 export interface HorizonPlan {
   schemaVersion: string
   sessionId: string
+  /** OpenCode session that owns autopilot continuation for this plan. */
+  openCodeSessionId?: string | null
+  /** Canonical workspace root used to prevent cross-project continuation. */
+  workspaceRoot?: string | null
   goal: string
   autonomyLevel: HorizonAutonomyLevel
   status: HorizonPlanStatus
@@ -248,7 +287,14 @@ export interface HorizonFeature {
   /** Bounded supervisor-facing summary; full implementation stays in child trace. */
   workerSummary?: string | null
   attempts: number
-  maxAttempts: number
+  /** @deprecated Compatibility field from schema 1.0. It no longer caps execution. */
+  maxAttempts?: number
+  /** Persisted strategy for the current unbounded recovery attempt. */
+  recovery?: HorizonRecoveryDirective | null
+  /** Immutable identifiers from superseded attempts, used to prevent evidence replay. */
+  attemptHistory?: HorizonAttemptRecord[]
+  /** Present only when work is paused by a proven external or hard product limit. */
+  blocker?: HorizonBlocker | null
   verification: {
     /** True only when backed by the persisted observed receipt below. */
     passed: boolean
@@ -278,6 +324,8 @@ export interface HorizonState {
   lastCheckpoint: string | null
   pausedAt: string | null
   pauseReason: string | null
+  /** Typed evidence required for a durable pause; legacy untyped pauses are resumable. */
+  blocker?: HorizonBlocker | null
 }
 
 export interface HorizonDecision {
@@ -295,6 +343,8 @@ export interface HorizonSessionMeta {
   createdAt: string
   status: HorizonPlanStatus
   autonomyLevel: HorizonAutonomyLevel
+  openCodeSessionId?: string | null
+  workspaceRoot?: string | null
 }
 
 export interface HorizonIndex {
@@ -304,9 +354,9 @@ export interface HorizonIndex {
 export interface HorizonConfig {
   autonomyLevel: HorizonAutonomyLevel
   autoApproveMilestones: boolean
-  maxRetryCycles: number
+  /** Attempts per adaptive strategy before Horizon escalates to a different approach. */
+  recoveryEscalationInterval: number
   decisionConfidenceThreshold: number
-  pauseOnCriticalFailure: boolean
   testCommand: string
   lintCommand: string
 }

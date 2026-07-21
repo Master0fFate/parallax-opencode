@@ -6,9 +6,9 @@
 
 ## 1. Positioning
 
-Horizon is durable, prompt-driven supervision for long-running engineering work. It persists plans, state, research, decisions, session skills, evaluations, and archived traces so later OpenCode invocations can inspect and resume work.
+Horizon is durable, self-iterative supervision for long-running engineering work. It persists plans, state, research, decisions, session skills, evaluations, recovery directives, blockers, and archived traces so later OpenCode processes can inspect and resume work.
 
-Horizon is not a background daemon, scheduler, or guarantee of unattended completion. It advances while OpenCode is running, the agent is active, required tools are available, and OpenCode permissions are granted. Bounded retries and durable state make interruptions and incomplete work explicit rather than hiding them.
+Horizon is not a background daemon or scheduler. While OpenCode is running, full autonomy is liveness-driven: the plugin listens for `session.idle` and queues a synthetic continuation whenever runnable work remains. Platform availability, explicit user cancellation, and OpenCode permissions remain authoritative.
 
 ## 2. Unified Verified Change Loop
 
@@ -29,13 +29,15 @@ OpenCode permission prompts are authoritative. Agent autonomy settings never byp
 - Decompose work into milestones and atomic features with acceptance criteria.
 - For every implementation feature, dispatch exactly one packaged `horizon-worker` with one atomic brief and wait for completion.
 - Observe and persist the worker's schema-v2 receipt ID and exact verdict, then dispatch exactly one packaged read-only `horizon-auditor` and wait for completion.
-- Accept only when the observed verdict is `pass` and the auditor accepts; otherwise dispatch one corrective worker within the retry cap.
+- Accept only when the observed verdict is `pass` and the auditor accepts; otherwise immediately dispatch a fresh corrective worker without an attempt cap.
 - At most one delegated task is active. Overlap, parallel dispatch, generic roles, and worker self-audit are forbidden.
 - Keep changes scoped and preserve unrelated behavior.
 - Keep implementation and audit detail in child sessions and durable traces; return only structured supervisor summaries bounded to 2,000 characters.
 - Persist material decisions and feature status through `horizon_*` tools.
 - Use optional session skills and `parallax_hyperplan` only when complexity warrants them.
-- Bound corrective cycles by `maxRetryCycles`; exhausted or unsafe work is marked failed or blocked, never silently counted complete.
+- Persist every attempt and rotate recovery by `recoveryEscalationInterval`: focused correction, replan from current evidence, framework/source research, then decomposition. The interval changes strategy; it never stops execution.
+- In full autonomy, failed checks, timeouts, low scores, missing receipts, and exhausted schema-1.0 budgets remain runnable. They cannot terminally fail a feature.
+- Pause only when a trusted OpenCode event records explicit cancellation/denied permission, or through a typed `blocked` feature with concrete evidence of missing credentials, an unavailable external service, or a platform/framework/structural limit.
 
 ### VERIFY
 
@@ -54,7 +56,7 @@ Each feature and final integration reports or persists:
 - material decisions and assumptions;
 - residual risks, skipped checks, failures, and blockers.
 
-The final Markdown handoff aggregates completed, failed, skipped, and blocked work and identifies resumable session state. It does not claim certainty beyond the receipts.
+The final Markdown handoff aggregates completed, skipped, and blocked work and identifies resumable session state. Full autonomy does not emit that handoff while ordinary runnable work remains. It does not claim certainty beyond the receipts.
 
 ## 3. Agent Definitions and Dispatch Allowlist
 
@@ -62,7 +64,7 @@ The installer packages `agents/horizon.md` (`mode: primary`), `agents/horizon-wo
 
 Horizon's `permission.task` is a last-match allowlist in this exact order: `"*": deny`, `"horizon-worker": allow`, `"horizon-auditor": allow`. It cannot dispatch generic or unbundled roles. Both child roles also deny `task`, so they cannot recursively delegate. `bash: ask` means OpenCode can pause for command approval; Horizon must not describe that platform pause as an autonomy failure.
 
-The plugin mode switch is `parallax_horizon`. It changes prompt mode; selecting the Horizon agent tab and using Horizon persistence tools remain explicit agent actions.
+The plugin mode switch is `parallax_horizon`. It changes prompt mode; selecting the Horizon agent tab and using Horizon persistence tools remain explicit agent actions. Once a full-autonomy plan is active, the idle-session hook continues that OpenCode session automatically until the plan completes or records a valid blocker.
 
 ## 4. Durable State
 
@@ -81,7 +83,7 @@ The plugin mode switch is `parallax_horizon`. It changes prompt mode; selecting 
 
 Project protocol state, traces, and verification receipts remain workspace-local under `.parallax/`. Horizon orchestration writes under its persistence root are exempt from project-write protocol enforcement; source-code edits are not.
 
-On resume, Horizon reads durable plan/state and then re-reads current repository state. Persisted intent may be stale and never overrides the current workspace.
+On resume, Horizon reads durable plan/state and then re-reads current repository state. Persisted intent may be stale and never overrides the current workspace. Schema-1.0 `failed` features and pauses without typed blocker evidence are treated as resumable work.
 
 ## 5. Runtime Tools
 
@@ -97,7 +99,7 @@ On resume, Horizon reads durable plan/state and then re-reads current repository
 
 The plugin exposes session initialization/list/status, plan/state read-write and feature/milestone update, decision read-append, research read-write, session-skill create/list, trace archive, observed receipt and audit persistence, advisory sub-agent evaluation, and configuration tools under the `horizon_*` prefix. `horizon_record_verification` resolves a receipt ID from the workspace ledger rather than accepting a caller-supplied verdict; `horizon_record_audit` requires that receipt evidence first. State writes reject more than one active subagent, and completion requires observed `pass` plus an independent `accept` audit.
 
-These tools persist and score supplied information. They do not themselves run continuously, dispatch sub-agents, or prove correctness. Sub-agent dispatch uses OpenCode's available `task` tool. Research uses whichever code, documentation, or web tools are actually present; no specific MCP or browser is assumed.
+These tools persist and score supplied information. They do not dispatch sub-agents or prove correctness. Automatic continuation belongs to the plugin event hook; sub-agent dispatch still uses OpenCode's available `task` tool. Research uses whichever code, documentation, or web tools are actually present; no specific MCP or browser is assumed.
 
 ## 6. Configuration Semantics
 
@@ -105,12 +107,12 @@ No shipped agent hardcodes a model. Primary and child roles inherit an available
 
 - `autonomyLevel`: `full`, `semi`, or `supervised` product checkpoint behavior.
 - `autoApproveMilestones`: whether milestone checkpoints are automatic.
-- `maxRetryCycles`: bounded feature correction attempts.
+- `recoveryEscalationInterval`: number of attempts before switching recovery strategy; it is not an attempt cap.
+- Legacy `maxRetryCycles`: accepted on read/write and migrated to `recoveryEscalationInterval` for schema-1.0 compatibility.
 - `decisionConfidenceThreshold`: threshold used in decision handling.
-- `pauseOnCriticalFailure`: configured critical-failure checkpoint behavior.
 - `testCommand`, `lintCommand`: requested broader checks, subject to availability and OpenCode permissions.
 
-Configuration guides agent behavior. It does not create a scheduler, command runner, timeout killer, or permission bypass in the persistence layer.
+Configuration guides agent behavior. The OpenCode event hook provides in-process continuation; it is not an external daemon, command runner, timeout killer, or permission bypass.
 
 ## 7. Evaluation
 
@@ -118,9 +120,9 @@ Configuration guides agent behavior. It does not create a scheduler, command run
 
 ## 8. Safety and Failure Semantics
 
-- Missing credentials/access or a consequential user-only decision may trigger one focused blocker question.
+- Trusted OpenCode events create permission/cancellation blockers; Horizon tools may create only evidence-backed credential, external-service, platform, framework, or structural blockers.
 - OpenCode permission requests are always honored.
-- Failed checks produce receipts and corrective work within the retry budget.
-- Retry exhaustion, unavailable verification, timeout, or interruption is reported and persisted accurately.
-- Package installation or other commands occur only through available tools under their configured permissions.
-- Durable state supports later resumption; it does not imply work continued after OpenCode stopped.
+- Failed checks, unavailable verification, timeout, or interruption are persisted and feed the next adaptive recovery attempt; they do not exhaust execution.
+- Repeated unchanged attempts are forbidden; every escalation window changes the recovery strategy.
+- Package installation, GitHub push, and npm publication occur only through available tools under their configured permissions and only after release gates pass.
+- Durable state and the idle hook support autonomous progress while OpenCode runs; after the process stops, the next invocation resumes from persisted state.
