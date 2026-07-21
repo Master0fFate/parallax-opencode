@@ -2,18 +2,19 @@
  * PARALLAX ENGINE -- Canonical TypeScript Plugin
  *
  * Consolidated source of truth for the Parallax Engine OpenCode plugin.
- * Contains all 7 custom tools, mode state machine (free/plan/build/debug),
- * protocol enforcement, friction-loop verification, skill injection,
+ * Contains Parallax and Horizon tools, the mode state machine, runtime prompt
+ * injection, protocol enforcement, friction-loop verification, skill injection,
  * session state preservation, and trace recording.
  *
  * License: MIT
  * Copyright (c) 2026 Master0fFate
  */
 
-import { type Plugin, tool } from "@opencode-ai/plugin"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
+import { type Plugin, tool, type ToolContext } from "@opencode-ai/plugin"
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs"
+import { createHash, randomUUID } from "node:crypto"
 import { homedir } from "os"
-import { join, resolve } from "path"
+import { dirname, join, resolve } from "path"
 
 import type {
   AgentMode,
@@ -24,13 +25,26 @@ import type {
   ParallaxConfig,
   HorizonAutonomyLevel,
 } from "./types.js"
-import { detectProject, runVerify } from "./detect.js"
+import { detectProject } from "./detect.js"
+import { loadEffectiveParallaxConfig } from "./config.js"
+import {
+  applyVerificationReceipt,
+  claimVerificationChanges,
+  completeVerificationClaim,
+  queueVerificationChanges,
+  readVerificationLedger,
+  restoreVerificationClaim,
+  syncVerificationLedger,
+  verifyAndRecord,
+  type VerificationChangeClaim,
+} from "./verification.js"
 import {
   initTrace,
   addPhase,
   addWrite,
   exportTrace,
   getTrace,
+  hydrateTrace,
 } from "./trace.js"
 import { computeCoherenceScore } from "./score.js"
 import * as horizon from "./horizon.js"
@@ -42,9 +56,9 @@ import * as hyperplan from "./hyperplan.js"
 const MAX_FRICTION_RETRIES = 3
 const CHECK_DEBOUNCE_MS = 1000
 const STATE_DEBOUNCE_MS = 100
-const CONFIG_DIR = join(homedir(), ".config", "opencode")
-const STATE_FILE = join(".parallax", "state.json")
-const CONFIG_FILE = join(".parallax", "config.json")
+const STATE_SCHEMA_VERSION = 2
+const CONFIG_DIR = resolve(process.env.OPENCODE_CONFIG_DIR || join(homedir(), ".config", "opencode"))
+const LEGACY_STATE_FILE = join(".parallax", "state.json")
 
 // ---------------------------------------------------------------------------
 // Module-level stores
@@ -55,6 +69,8 @@ const modeStore = new Map<string, ModeState>()
 const protocolStore = new Map<string, ProtocolState>()
 let currentSessionId: string | null = null
 let currentAgentName: string | null = null
+const sessionRootStore = new Map<string, string>()
+const sessionAgentStore = new Map<string, string>()
 
 // Known agent names for case-insensitive matching. Add new agents here.
 const KNOWN_AGENTS = ["parallax", "horizon"] as const
@@ -77,17 +93,40 @@ function normalizeAgentName(name: string | null | undefined): string | null {
  * Check if the current agent matches a known agent name (case-insensitive).
  * Use this instead of `currentAgentName === "horizon"` to avoid case-sensitivity bugs.
  */
-function isAgent(agentName: string): boolean {
-  return normalizeAgentName(currentAgentName) === normalizeAgentName(agentName)
+function isAgent(agentName: string, sid: string = sessionId()): boolean {
+  const active = sessionAgentStore.get(sid) || (sid === "current" ? currentAgentName : null)
+  return normalizeAgentName(active) === normalizeAgentName(agentName)
 }
 
-// Protocol state uses a fixed key that never changes within a plugin load.
-// OpenCode creates multiple internal sessions (root, child, subagent) during
-// a single conversation. The protocol state must survive all of them.
-const PROTOCOL_KEY = "current"
+function sessionId(explicit?: string | null): string {
+  return explicit || currentSessionId || "current"
+}
 
-function sessionId(): string {
-  return PROTOCOL_KEY
+function safeFileId(id: string): string {
+  if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) && id !== "." && id !== "..") {
+    return id
+  }
+  return `session-${createHash("sha256").update(id).digest("hex")}`
+}
+
+function stateFile(root: string, sid: string): string {
+  if (sid === "current") return legacyStateFile(root)
+  return join(resolve(root), ".parallax", "sessions", safeFileId(sid), "state.json")
+}
+
+function legacyStateFile(root: string): string {
+  return join(resolve(root), LEGACY_STATE_FILE)
+}
+
+function rootForSession(sid: string, fallback: string = process.cwd()): string {
+  return sessionRootStore.get(sid) || resolve(fallback)
+}
+
+function writeJsonAtomic(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true })
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
+  writeFileSync(temporary, JSON.stringify(value, null, 2), "utf8")
+  renameSync(temporary, path)
 }
 
 function getFriction(s: string = sessionId()): FrictionState {
@@ -129,34 +168,29 @@ function getProtocol(s: string = sessionId()): ProtocolState {
 // Config loader
 // ---------------------------------------------------------------------------
 
-let configCache: ParallaxConfig | null = null
-let configCacheLoaded = false
+const configCache = new Map<string, ParallaxConfig>()
 
-function loadConfig(): ParallaxConfig {
-  if (configCacheLoaded) return configCache || {}
-  configCacheLoaded = true
-  try {
-    if (existsSync(CONFIG_FILE)) {
-      const raw = readFileSync(CONFIG_FILE, "utf8")
-      configCache = JSON.parse(raw) as ParallaxConfig
-    }
-  } catch {
-    // Invalid JSON or missing file -> use defaults
-  }
-  return configCache || {}
+function loadConfig(root: string = rootForSession(sessionId())): ParallaxConfig {
+  const path = join(resolve(root), ".parallax", "config.json")
+  if (configCache.has(path)) return configCache.get(path)!
+  // Invalid or malformed settings are explicit failures rather than silently
+  // weakening protocol enforcement.
+  const config: ParallaxConfig = loadEffectiveParallaxConfig(root)
+  configCache.set(path, config)
+  return config
 }
 
-function strictness(): NonNullable<ParallaxConfig["strictness"]> {
-  return loadConfig().strictness || "strict"
+function strictness(root?: string): NonNullable<ParallaxConfig["strictness"]> {
+  return loadConfig(root).strictness || "strict"
 }
 
-function isStrictMode(): boolean {
-  return strictness() === "strict"
+function isStrictMode(root?: string): boolean {
+  return strictness(root) === "strict"
 }
 
-function isPathInside(root: string, target: string): boolean {
+function isPathInside(root: string, target: string, targetBase: string = root): boolean {
   const resolvedRoot = resolve(root)
-  const resolvedTarget = resolve(target)
+  const resolvedTarget = resolve(targetBase, target)
   return resolvedTarget === resolvedRoot ||
     resolvedTarget.startsWith(resolvedRoot + "\\") ||
     resolvedTarget.startsWith(resolvedRoot + "/")
@@ -166,167 +200,105 @@ function isPathInside(root: string, target: string): boolean {
 // State persistence (Phase 2.1)
 // ---------------------------------------------------------------------------
 
-let stateDebounceTimer: ReturnType<typeof setTimeout> | null = null
+const stateDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-function flushState(): void {
-  try {
-    mkdirSync(join(process.cwd(), ".parallax"), { recursive: true })
-    const s = getFriction()
-    const m = getMode()
-    // Use in-memory state directly. flushState() is called AFTER in-memory
-    // stores have been modified (e.g. parallax_checkin sets flags, then calls
-    // writeState(true) -> flushState()). Reading from disk here would overwrite
-    // the just-set in-memory changes with stale disk data.
-    const p = getProtocol()
-    const trace = getTrace(sessionId())
-    const state = {
-      sessionId: "current",
-      sessionStart: trace.session.startedAt,
-      mode: m.mode,
-      friction: {
-        successes: s.successes,
-        trials: s.trials,
-        retriesLeft: s.retriesLeft,
-        lastObservation: s.lastObservation,
-      },
-      protocol: {
-        ambiguityDone: p.ambiguityDone,
-        invariantsDone: p.invariantsDone,
-        gateDone: p.gateDone,
-        designDone: p.designDone,
-        commitDone: p.commitDone,
-        summaryDone: p.summaryDone,
-        writesBeforeGate: p.writesBeforeGate,
-        gateBlocked: p.gateBlocked,
-      },
-    }
-    // Debug: write BEFORE state file to isolate error
-    const json = JSON.stringify(state, null, 2)
-    writeFileSync(STATE_FILE, json, "utf8")
-  } catch {
+function stateSnapshot(sid: string) {
+  const friction = getFriction(sid)
+  const protocol = getProtocol(sid)
+  return {
+    schemaVersion: STATE_SCHEMA_VERSION,
+    sessionId: sid,
+    sessionStart: getTrace(sid).session.startedAt,
+    mode: getMode(sid).mode,
+    friction: { ...friction },
+    protocol: { ...protocol },
   }
 }
 
-function writeState(immediate = false): void {
+function flushState(sid: string = sessionId(), root: string = rootForSession(sid)): void {
+  try {
+    writeJsonAtomic(stateFile(root, sid), stateSnapshot(sid))
+  } catch {
+    // Persistence is best-effort; protocol enforcement must not crash on I/O errors.
+  }
+}
+
+function writeState(
+  immediate = false,
+  sid: string = sessionId(),
+  root: string = rootForSession(sid),
+): void {
+  const key = `${resolve(root)}\0${sid}`
+  const pending = stateDebounceTimers.get(key)
+  if (pending) clearTimeout(pending)
   if (immediate) {
-    flushState()
+    stateDebounceTimers.delete(key)
+    flushState(sid, root)
     return
   }
-  if (stateDebounceTimer) clearTimeout(stateDebounceTimer)
-  stateDebounceTimer = setTimeout(() => {
-    stateDebounceTimer = null
-    try {
-      const s = getFriction()
-      const m = getMode()
-      // Use in-memory state directly. writeState() is debounced from callers
-      // that just modified in-memory stores (tool.execute.before, parallax_checkin).
-      // Reading from disk here would overwrite those modifications with stale data.
-      const p = getProtocol()
-      const state = {
-        sessionId: "current",
-        sessionStart: getTrace(sessionId()).session.startedAt,
-        mode: m.mode,
-        friction: {
-          successes: s.successes,
-          trials: s.trials,
-          retriesLeft: s.retriesLeft,
-          lastObservation: s.lastObservation,
-        },
-        protocol: {
-          ambiguityDone: p.ambiguityDone,
-          invariantsDone: p.invariantsDone,
-          gateDone: p.gateDone,
-          designDone: p.designDone,
-          commitDone: p.commitDone,
-          summaryDone: p.summaryDone,
-          writesBeforeGate: p.writesBeforeGate,
-          gateBlocked: p.gateBlocked,
-        },
-      }
-      mkdirSync(join(process.cwd(), ".parallax"), { recursive: true })
-      writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8")
-    } catch {
-      // Best-effort: don't crash the plugin if disk is full
-    }
+  const timer = setTimeout(() => {
+    stateDebounceTimers.delete(key)
+    flushState(sid, root)
   }, STATE_DEBOUNCE_MS)
+  stateDebounceTimers.set(key, timer)
 }
 
-
-// ---------------------------------------------------------------------------
-// Read full state from disk and sync all in-memory stores.
-// OpenCode loads plugins in separate execution contexts for tools vs hooks.
-// In-memory Maps are NOT shared across contexts. This function bridges the
-// gap by reading the persisted state.json and updating the current context's
-// in-memory stores so that subsequent getProtocol()/getMode()/getFriction()
-// calls return the correct values.
-// ---------------------------------------------------------------------------
-
-function syncStateFromDisk(): void {
+function readPersistedState(sid: string, root: string): any | null {
+  const path = stateFile(root, sid)
   try {
-    if (!existsSync(STATE_FILE)) return
-    const raw = readFileSync(STATE_FILE, "utf8")
-    const s = JSON.parse(raw)
-    if (!s) return
+    if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8"))
 
-    const sid = sessionId()
-
-    // Sync protocol state
-    if (s.protocol) {
-      protocolStore.set(sid, {
-        ambiguityDone: s.protocol.ambiguityDone === true,
-        invariantsDone: s.protocol.invariantsDone === true,
-        gateDone: s.protocol.gateDone === true,
-        designDone: s.protocol.designDone === true,
-        commitDone: s.protocol.commitDone === true,
-        summaryDone: s.protocol.summaryDone === true,
-        writesBeforeGate: typeof s.protocol.writesBeforeGate === "number" ? s.protocol.writesBeforeGate : 0,
-        gateBlocked: s.protocol.gateBlocked === true,
-      })
+    // v1 stored every conversation in .parallax/state.json as session "current".
+    // Atomically claim it once so unrelated future sessions cannot inherit stale
+    // completed gates. The claimed file remains as a recovery/audit artifact.
+    const legacy = legacyStateFile(root)
+    if (!existsSync(legacy)) return null
+    const claimed = `${legacy}.migrated`
+    try {
+      renameSync(legacy, claimed)
+    } catch {
+      return null
     }
-
-    // Sync mode
-    if (s.mode && ["free", "plan", "build", "debug", "horizon"].includes(s.mode)) {
-      modeStore.set(sid, { mode: s.mode as AgentMode })
-    }
-
-    // Sync friction
-    if (s.friction) {
-      frictionStore.set(sid, {
-        successes: typeof s.friction.successes === "number" ? s.friction.successes : 0,
-        trials: typeof s.friction.trials === "number" ? s.friction.trials : 0,
-        retriesLeft: typeof s.friction.retriesLeft === "number" ? s.friction.retriesLeft : MAX_FRICTION_RETRIES,
-        lastObservation: s.friction.lastObservation || null,
-      })
-    }
+    const migrated = JSON.parse(readFileSync(claimed, "utf8"))
+    if (!migrated || typeof migrated !== "object") return null
+    const versioned = { ...migrated, schemaVersion: STATE_SCHEMA_VERSION, sessionId: sid }
+    writeJsonAtomic(path, versioned)
+    return versioned
   } catch {
-    // Corrupt or unreadable state file -- ignore, defaults will be used
+    return null
   }
 }
 
-// ---------------------------------------------------------------------------
-// Read protocol state from disk (write hook reads this, not in-memory Maps)
-// ---------------------------------------------------------------------------
+function syncStateFromDisk(
+  sid: string = sessionId(),
+  root: string = rootForSession(sid),
+): void {
+  const state = readPersistedState(sid, root)
+  if (!state || (state.schemaVersion !== undefined && state.schemaVersion !== STATE_SCHEMA_VERSION)) return
 
-function readProtocolFromDisk(): ProtocolState | null {
-  try {
-    if (existsSync(STATE_FILE)) {
-      const raw = readFileSync(STATE_FILE, "utf8")
-      const s = JSON.parse(raw)
-      if (s && s.protocol) {
-        return {
-          ambiguityDone: s.protocol.ambiguityDone === true,
-          invariantsDone: s.protocol.invariantsDone === true,
-          gateDone: s.protocol.gateDone === true,
-          designDone: s.protocol.designDone === true,
-          commitDone: s.protocol.commitDone === true,
-          summaryDone: s.protocol.summaryDone === true,
-          writesBeforeGate: typeof s.protocol.writesBeforeGate === "number" ? s.protocol.writesBeforeGate : 0,
-          gateBlocked: s.protocol.gateBlocked === true,
-        }
-      }
-    }
-  } catch {}
-  return null
+  if (state.protocol) {
+    protocolStore.set(sid, {
+      ambiguityDone: state.protocol.ambiguityDone === true,
+      invariantsDone: state.protocol.invariantsDone === true,
+      gateDone: state.protocol.gateDone === true,
+      designDone: state.protocol.designDone === true,
+      commitDone: state.protocol.commitDone === true,
+      summaryDone: state.protocol.summaryDone === true,
+      writesBeforeGate: Number.isFinite(state.protocol.writesBeforeGate) ? state.protocol.writesBeforeGate : 0,
+      gateBlocked: state.protocol.gateBlocked === true,
+    })
+  }
+  if (["free", "plan", "build", "debug", "horizon"].includes(state.mode)) {
+    modeStore.set(sid, { mode: state.mode as AgentMode })
+  }
+  if (state.friction) {
+    frictionStore.set(sid, {
+      successes: Number.isFinite(state.friction.successes) ? state.friction.successes : 0,
+      trials: Number.isFinite(state.friction.trials) ? state.friction.trials : 0,
+      retriesLeft: Number.isFinite(state.friction.retriesLeft) ? state.friction.retriesLeft : MAX_FRICTION_RETRIES,
+      lastObservation: typeof state.friction.lastObservation === "string" ? state.friction.lastObservation : null,
+    })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -404,14 +376,127 @@ const MODE_META: Record<AgentMode, ModeMeta> = {
 // Debounce timer
 // ---------------------------------------------------------------------------
 
-let debounceTimer: ReturnType<typeof setTimeout> | null = null
+const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const pendingChangedFiles = new Map<string, Set<string>>()
+
+function verificationBatchKey(root: string, sid: string): string {
+  return `${resolve(root)}\0${sid}`
+}
+
+function changedFilesFromTool(
+  toolName: string,
+  args: Record<string, unknown>,
+): string[] {
+  const direct = typeof args.filePath === "string"
+    ? args.filePath
+    : typeof args.path === "string"
+      ? args.path
+      : null
+  if (direct) return [direct]
+
+  // OpenCode apply_patch payloads can touch several files in one tool call.
+  const patch = typeof args.patchText === "string"
+    ? args.patchText
+    : typeof args.patch === "string"
+      ? args.patch
+      : ""
+  const files = [...patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$/gm)]
+    .map((match) => match[1])
+    .filter(Boolean)
+  return files.length > 0 ? files : [`(${toolName}: path unavailable)`]
+}
 
 // ---------------------------------------------------------------------------
 // Plugin export
 // ---------------------------------------------------------------------------
 
-export const plugin: Plugin = async ({ client }) => {
-    return {
+export const plugin: Plugin = async ({ client, directory, worktree }) => {
+  const pluginRoot = resolve(worktree || directory || process.cwd())
+
+  const activateSession = (requested?: string | null, requestedRoot?: string | null) => {
+    const sid = sessionId(requested)
+    // Hooks such as tool.execute.before do not carry a directory. Preserve the
+    // root learned from that session's ToolContext/event instead of resetting
+    // it to the plugin process's original worktree.
+    const root = resolve(requestedRoot || sessionRootStore.get(sid) || pluginRoot)
+    currentSessionId = sid
+    sessionRootStore.set(sid, root)
+    hydrateTrace(sid, root)
+    return { sid, root }
+  }
+
+  const toolRuntime = (context?: ToolContext) => {
+    const runtime = activateSession(
+      context?.sessionID || "current",
+      context?.worktree || context?.directory,
+    )
+    const agent = normalizeAgentName(context?.agent)
+    if (agent) sessionAgentStore.set(runtime.sid, agent)
+    return runtime
+  }
+
+  const takePendingBatch = (
+    sid: string,
+    root: string,
+    cancelTimer = true,
+  ): { changedFiles: string[]; claim: VerificationChangeClaim | null } => {
+    const key = verificationBatchKey(root, sid)
+    if (cancelTimer) {
+      const timer = debounceTimers.get(key)
+      if (timer) clearTimeout(timer)
+      debounceTimers.delete(key)
+    }
+    const claim = claimVerificationChanges(root, sid)
+    const files = new Set<string>(claim?.changedFiles || [])
+    for (const file of pendingChangedFiles.get(key) || []) files.add(file)
+    pendingChangedFiles.delete(key)
+    return { changedFiles: [...files].sort(), claim }
+  }
+
+  const applyReceipt = (sid: string, root: string, receipt: ReturnType<typeof verifyAndRecord>) => {
+    const friction = getFriction(sid)
+    applyVerificationReceipt(friction, receipt, MAX_FRICTION_RETRIES)
+    for (const file of receipt.changedFiles) {
+      addWrite(sid, file, receipt.verdict, friction.retriesLeft, receipt.id)
+    }
+    writeState(true, sid, root)
+    return friction
+  }
+
+  const verifyBatch = (
+    sid: string,
+    root: string,
+    source: "manual" | "automatic",
+    batch: { changedFiles: string[]; claim: VerificationChangeClaim | null },
+  ) => {
+    let receipt: ReturnType<typeof verifyAndRecord>
+    try {
+      receipt = verifyAndRecord({
+        directory: root,
+        sessionId: sid,
+        source,
+        changedFiles: batch.changedFiles,
+      })
+      // The durable receipt now owns attribution; only unrecorded claims recover.
+      if (batch.claim) completeVerificationClaim(batch.claim)
+    } catch (error) {
+      if (batch.claim) restoreVerificationClaim(root, sid, batch.claim)
+      // Files that only existed in the in-memory fallback are not part of the
+      // durable claim. Retain them for the next manual or automatic attempt.
+      const claimedFiles = new Set(batch.claim?.changedFiles || [])
+      const memoryOnly = batch.changedFiles.filter((file) => !claimedFiles.has(file))
+      if (memoryOnly.length > 0) {
+        const key = verificationBatchKey(root, sid)
+        const retained = pendingChangedFiles.get(key) || new Set<string>()
+        for (const file of memoryOnly) retained.add(file)
+        pendingChangedFiles.set(key, retained)
+      }
+      throw error
+    }
+    return { receipt, friction: applyReceipt(sid, root, receipt) }
+  }
+
+  return {
     // -----------------------------------------------------------------------
     // Custom tools
     // -----------------------------------------------------------------------
@@ -420,19 +505,28 @@ export const plugin: Plugin = async ({ client }) => {
       // VERIFY
       parallax_verify: tool({
         description:
-          "Run the project's verification command (cargo check, tsc, npm run lint, " +
-          "python compileall) and return the result. Use this instead of running " +
-          "checks manually via bash.",
+          "Run the project's deterministic verification script with a timeout and record " +
+          "a schema-v2 receipt. Use this instead of running checks manually via bash.",
         args: {},
-        async execute() {
-          const result = runVerify()
-          if (!result) {
-            return "[parallax] No known project type -- skipping verification."
-          }
-          if (result.exitCode === 0) {
-            return `[parallax] VERIFICATION PASSED (exit 0)\n${truncate(result.stdout, 500)}`
-          }
-          return `[parallax] VERIFICATION FAILED (exit ${result.exitCode})\n${truncate(result.combined, 2000)}`
+        async execute(_args, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
+          syncStateFromDisk(sid, root)
+          // A manual check claims the same durable batch as auto-check.
+          const { receipt } = verifyBatch(sid, root, "manual", takePendingBatch(sid, root))
+          const invocation = receipt.command
+            ? `${receipt.command} ${receipt.args.join(" ")}`
+            : "(no command)"
+          const heading = receipt.verdict === "pass"
+            ? "VERIFICATION PASSED"
+            : receipt.verdict === "fail"
+              ? "VERIFICATION FAILED"
+              : `VERIFICATION ${receipt.verdict.toUpperCase()}`
+          const evidence = receipt.combined || receipt.skipReason || "No output"
+          return (
+            `[parallax] ${heading} (${receipt.durationMs}ms, exit ${receipt.exitCode ?? "none"})\n` +
+            `Command: ${invocation}\nReceipt: ${receipt.id}\n` +
+            truncate(evidence, 2000)
+          )
         },
       }),
 
@@ -447,8 +541,9 @@ export const plugin: Plugin = async ({ client }) => {
             "The component, module, function, or change to analyze",
           ),
         },
-        async execute(args: { topic: string }) {
-          addPhase(sessionId(), "mode_switch", { analysisTopic: args.topic })
+        async execute(args: { topic: string }, context?: ToolContext) {
+          const { sid } = toolRuntime(context)
+          addPhase(sid, "mode_switch", { analysisTopic: args.topic })
           return (
             `[parallax] ANALYSIS FRAMEWORK: ${args.topic}\n\n` +
             `Apply these questions to "${args.topic}":\n\n` +
@@ -483,8 +578,10 @@ export const plugin: Plugin = async ({ client }) => {
             "The protocol step to mark complete: ambiguity, invariants, gate, design, commit, summary",
           ),
         },
-        async execute(args: { step: string }) {
-          const p = getProtocol()
+        async execute(args: { step: string }, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
+          syncStateFromDisk(sid, root)
+          const p = getProtocol(sid)
           const step = args.step as ProtocolStep
 
           if (!STEP_LABELS[step]) {
@@ -494,14 +591,13 @@ export const plugin: Plugin = async ({ client }) => {
             )
           }
 
-          const sid = sessionId()
-          const cfg = loadConfig()
+          const cfg = loadConfig(root)
 
           // Enforce ordering
           if (step === "ambiguity" && !p.ambiguityDone) {
             p.ambiguityDone = true
             addPhase(sid, "ambiguity_check")
-            writeState(true)
+            writeState(true, sid, root)
             return "[parallax] Step 1/6: Ambiguity Check marked complete."
           }
           if (step === "invariants") {
@@ -510,7 +606,7 @@ export const plugin: Plugin = async ({ client }) => {
             }
             p.invariantsDone = true
             addPhase(sid, "four_invariants")
-            writeState(true)
+            writeState(true, sid, root)
             return "[parallax] Step 2/6: 4 Invariants marked complete."
           }
           if (step === "gate") {
@@ -519,7 +615,7 @@ export const plugin: Plugin = async ({ client }) => {
             }
             p.gateDone = true
             addPhase(sid, "verification_gate")
-            writeState(true)
+            writeState(true, sid, root)
             return "[parallax] Step 3/6: Verification Gate marked complete."
           }
           if (step === "design") {
@@ -528,24 +624,25 @@ export const plugin: Plugin = async ({ client }) => {
             }
             p.designDone = true
             addPhase(sid, "design_check")
-            writeState(true)
+            writeState(true, sid, root)
             return "[parallax] Step 4/6: Design Doc marked complete."
           }
           if (step === "commit") {
             p.commitDone = true
             addPhase(sid, "commit_decision")
-            writeState(true)
+            writeState(true, sid, root)
             return "[parallax] Step 5/6: Commit Decision marked complete."
           }
           if (step === "summary") {
             p.summaryDone = true
             addPhase(sid, "summary")
-            writeState(true)
+            writeState(true, sid, root)
 
             // Phase 2.3: Post-session retrospective
+            syncVerificationLedger(sid, root)
             const trace = getTrace(sid)
             const breakdown = computeCoherenceScore(trace)
-            const s = getFriction()
+            const s = getFriction(sid)
             const passCount = trace.writes.filter((w) => w.verification === "pass").length
             const failCount = trace.writes.filter((w) => w.verification === "fail").length
 
@@ -583,18 +680,19 @@ export const plugin: Plugin = async ({ client }) => {
       // MODE: PLAN
       parallax_plan: tool({
         description:
-          "Switch to PLAN mode. Injects the Precision Architect skill for deep " +
-          "requirements elicitation and structured planning. Best for Phase 1-3 " +
-          "of the protocol. Use this when you need to fully spec out a feature " +
-          "before building.",
+          "Switch to PLAN mode. Injects evidence-led scoping and verification planning. " +
+          "Clear requests proceed with documented assumptions; essential unresolved " +
+          "user-only decisions are asked once in a bundled question set.",
         args: {},
-        async execute() {
-          getMode().mode = "plan"
-          addPhase(sessionId(), "mode_switch", { mode: "plan" })
-          writeState()
+        async execute(_args, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
+          syncStateFromDisk(sid, root)
+          getMode(sid).mode = "plan"
+          addPhase(sid, "mode_switch", { mode: "plan" })
+          writeState(true, sid, root)
           return (
-            "[parallax] PLAN mode activated. Precision Architect skill loaded. " +
-            "Elicit requirements fully before building."
+            "[parallax] PLAN mode activated. Build a scoped plan with acceptance " +
+            "criteria, planned checks, and an honest receipt."
           )
         },
       }),
@@ -606,10 +704,12 @@ export const plugin: Plugin = async ({ client }) => {
           "Best for Phase 4-5 execution work. Use this when you have a clear plan " +
           "and need to write code.",
         args: {},
-        async execute() {
-          getMode().mode = "build"
-          addPhase(sessionId(), "mode_switch", { mode: "build" })
-          writeState()
+        async execute(_args, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
+          syncStateFromDisk(sid, root)
+          getMode(sid).mode = "build"
+          addPhase(sid, "mode_switch", { mode: "build" })
+          writeState(true, sid, root)
           return (
             "[parallax] BUILD mode activated. Standard Parallax execution protocol. " +
             "Write clean code, verify with parallax_verify."
@@ -620,17 +720,18 @@ export const plugin: Plugin = async ({ client }) => {
       // MODE: DEBUG
       parallax_debug: tool({
         description:
-          "Switch to DEBUG mode. Injects the Universal Auditor skill for " +
-          "comprehensive post-build audit. Best for Phase 6 review. Use this " +
-          "after building to audit quality, security, and correctness.",
+          "Switch to DEBUG mode for evidence-based investigation, scoped remediation, " +
+          "regression verification, and an honest audit receipt.",
         args: {},
-        async execute() {
-          getMode().mode = "debug"
-          addPhase(sessionId(), "mode_switch", { mode: "debug" })
-          writeState()
+        async execute(_args, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
+          syncStateFromDisk(sid, root)
+          getMode(sid).mode = "debug"
+          addPhase(sid, "mode_switch", { mode: "debug" })
+          writeState(true, sid, root)
           return (
-            "[parallax] DEBUG mode activated. Universal Auditor skill loaded. " +
-            "Run a full audit pass."
+            "[parallax] DEBUG mode activated. Investigate evidence, verify scoped " +
+            "remediation when requested, and report assurance limits."
           )
         },
       }),
@@ -638,21 +739,21 @@ export const plugin: Plugin = async ({ client }) => {
       // MODE: HORIZON
       parallax_horizon: tool({
         description:
-          "Switch to HORIZON mode. Activates the long-horizon autonomous " +
-          "supervisor agent that plans, researches, executes, self-tests, " +
-          "and self-iterates until the task is 100% complete. Orchestrates " +
-          "sub-agents with Parallax reasoning for deep work. Use for " +
-          "multi-hour to multi-day tasks spanning multiple files.",
+          "Switch to HORIZON mode for durable long-running supervision with " +
+          "persisted plans, bounded retries, verification receipts, and resumable state. " +
+          "Horizon advances while OpenCode is running and permissions are granted; " +
+          "it is not a background daemon or a completion guarantee.",
         args: {},
-        async execute() {
-          getMode().mode = "horizon"
-          addPhase(sessionId(), "mode_switch", { mode: "horizon" })
-          writeState()
+        async execute(_args, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
+          syncStateFromDisk(sid, root)
+          getMode(sid).mode = "horizon"
+          addPhase(sid, "mode_switch", { mode: "horizon" })
+          writeState(true, sid, root)
           return (
-            "[parallax] HORIZON mode activated. " +
-            "Long-horizon autonomous supervisor loaded. " +
-            "I will plan, research, execute, self-test, and self-iterate " +
-            "until the task is 100% complete."
+            "[parallax] HORIZON mode activated for durable supervision. " +
+            "Work will follow PREFLIGHT -> CHANGE -> VERIFY -> RECEIPT with " +
+            "bounded retries, persisted state, and OpenCode permissions respected."
           )
         },
       }),
@@ -730,15 +831,33 @@ export const plugin: Plugin = async ({ client }) => {
                 "and milestones array."
               )
             }
+            if (plan.sessionId !== args.sessionId || !["planning", "executing"].includes(plan.status)) {
+              return "[horizon] ERROR: Plan identity/status is invalid for the planning surface."
+            }
+            const features = plan.milestones.flatMap(
+              (milestone: { features?: unknown[] }) => Array.isArray(milestone.features) ? milestone.features : [],
+            ) as Array<Record<string, any>>
+            const retryCap = horizon.loadHorizonConfig().maxRetryCycles
+            const invalidFeature = features.find((feature) =>
+              feature.status !== "pending" || feature.attempts !== 0 || feature.subAgentSessionId != null ||
+              feature.workerSummary != null || feature.audit != null || feature.verification?.passed !== false ||
+              feature.verification?.receiptId != null || feature.verification?.verdict != null ||
+              !Number.isInteger(feature.maxAttempts) || feature.maxAttempts < 1 || feature.maxAttempts > retryCap)
+            if (invalidFeature) {
+              return (
+                `[horizon] ERROR: Plan feature '${String(invalidFeature.id || "unknown")}' contains execution/evidence state. ` +
+                "Use the feature, receipt, and audit transition tools; planning cannot manufacture readiness."
+              )
+            }
+            if (!plan.stats || plan.stats.completedFeatures !== 0 || plan.stats.failedFeatures !== 0 ||
+                plan.stats.totalRetries !== 0 || plan.stats.totalFeatures !== features.length) {
+              return "[horizon] ERROR: Initial plan statistics must describe pending features only."
+            }
             horizon.writeHorizonPlan(args.sessionId, plan)
-            const features = plan.milestones.reduce(
-              (acc: number, m: { features?: unknown[] }) =>
-                acc + (m.features ? m.features.length : 0),
-              0,
-            )
+            const featureCount = features.length
             return (
               `[horizon] Plan written for session: ${args.sessionId}\n` +
-              `Milestones: ${plan.milestones.length}, Features: ${features}`
+              `Milestones: ${plan.milestones.length}, Features: ${featureCount}`
             )
           } catch (e) {
             return `[horizon] ERROR: Invalid JSON in planJson -- ${String(e)}`
@@ -808,35 +927,33 @@ export const plugin: Plugin = async ({ client }) => {
               `Must be one of: ${validStatuses.join(", ")}`
             )
           }
+          const currentFeature = horizon.readHorizonPlan(args.sessionId)?.milestones
+            .flatMap((milestone) => milestone.features)
+            .find((feature) => feature.id === args.featureId)
+          if (!currentFeature) {
+            return `[horizon] Feature '${args.featureId}' not found in session ${args.sessionId}.`
+          }
+          if (args.status === "in_progress" && !args.subAgentSessionId?.trim()) {
+            return "[horizon] ERROR: Sequential execution requires the active horizon-worker session ID."
+          }
+          if (args.status !== "in_progress" && args.subAgentSessionId) {
+            return "[horizon] ERROR: A child worker session ID is accepted only when starting an in-progress worker stage."
+          }
+          if (args.status === "completed" && !horizon.horizonFeatureIsReady(currentFeature)) {
+            return "[horizon] ERROR: Feature readiness requires an observed pass receipt and an independent horizon-auditor accept verdict."
+          }
           const updates: Record<string, unknown> = { status: args.status }
-          if (args.subAgentSessionId) {
-            updates.subAgentSessionId = args.subAgentSessionId
+          if (args.status === "in_progress") updates.subAgentSessionId = args.subAgentSessionId
+          let result
+          try {
+            result = horizon.updateHorizonFeature(
+              args.sessionId,
+              args.featureId,
+              updates as any,
+            )
+          } catch (error) {
+            return `[horizon] ERROR: ${error instanceof Error ? error.message : String(error)}`
           }
-          if (args.status === "in_progress") {
-            const plan = horizon.readHorizonPlan(args.sessionId)
-            if (plan) {
-              const feature = plan.milestones
-                .flatMap((m) => m.features)
-                .find((f) => f.id === args.featureId)
-              if (feature) {
-                // RETRY CAP ENFORCEMENT: reject if max retries exceeded
-                const config = horizon.loadHorizonConfig()
-                if (feature.attempts >= (feature.maxAttempts || config.maxRetryCycles)) {
-                  return (
-                    `[horizon] RETRY CAP REACHED for '${args.featureId}'. ` +
-                    `Attempts: ${feature.attempts}/${feature.maxAttempts || config.maxRetryCycles}. ` +
-                    `Mark the feature as 'failed' to move on, or adjust maxRetryCycles in config.`
-                  )
-                }
-                updates.attempts = feature.attempts + 1
-              }
-            }
-          }
-          const result = horizon.updateHorizonFeature(
-            args.sessionId,
-            args.featureId,
-            updates as any,
-          )
           if (!result) {
             return `[horizon] Feature '${args.featureId}' not found in session ${args.sessionId}.`
           }
@@ -860,6 +977,86 @@ export const plugin: Plugin = async ({ client }) => {
             `[horizon] Feature '${args.featureId}' updated to '${args.status}'\n` +
             `Progress: ${result.stats.completedFeatures}/${result.stats.totalFeatures} (${pct}%)`
           )
+        },
+      }),
+
+      // HORIZON RECORD OBSERVED VERIFICATION
+      horizon_record_verification: tool({
+        description:
+          "Persist a feature's observed schema-v2 receipt evidence from the workspace ledger. " +
+          "The verdict is looked up by receipt ID and cannot be supplied or replaced by a score.",
+        args: {
+          sessionId: tool.schema.string().describe("Horizon session ID"),
+          featureId: tool.schema.string().describe("Feature ID"),
+          receiptId: tool.schema.string().describe("Observed schema-v2 receipt ID"),
+          workerSummary: tool.schema.string().optional().describe(
+            "Bounded worker summary (maximum 2000 characters; details remain in the child trace)",
+          ),
+        },
+        async execute(args: {
+          sessionId: string
+          featureId: string
+          receiptId: string
+          workerSummary?: string
+        }, context?: ToolContext) {
+          const { root } = toolRuntime(context)
+          const receipt = readVerificationLedger(root).receipts.find((candidate) => candidate.id === args.receiptId)
+          if (!receipt) return `[horizon] ERROR: Receipt '${args.receiptId}' was not observed in the workspace schema-v2 ledger.`
+          try {
+            const result = horizon.recordHorizonVerificationReceipt(
+              args.sessionId,
+              args.featureId,
+              receipt,
+              args.workerSummary || "",
+            )
+            if (!result) return `[horizon] Feature '${args.featureId}' not found.`
+            return `[horizon] Observed receipt persisted: ${receipt.id}\nVerdict: ${receipt.verdict}\nPassing evidence: ${receipt.verdict === "pass" ? "yes" : "no"}`
+          } catch (error) {
+            return `[horizon] ERROR: ${error instanceof Error ? error.message : String(error)}`
+          }
+        },
+      }),
+
+      // HORIZON RECORD INDEPENDENT AUDIT
+      horizon_record_audit: tool({
+        description:
+          "Persist one bounded independent horizon-auditor result after observed receipt evidence. " +
+          "This records review evidence but cannot convert a non-pass receipt into readiness.",
+        args: {
+          sessionId: tool.schema.string().describe("Horizon session ID"),
+          featureId: tool.schema.string().describe("Feature ID"),
+          auditorSessionId: tool.schema.string().describe("Independent horizon-auditor child session ID"),
+          verdict: tool.schema.string().describe("accept or corrective-worker"),
+          summary: tool.schema.string().describe("Bounded audit summary, maximum 2000 characters"),
+          traceId: tool.schema.string().optional().describe("Archived child trace ID"),
+        },
+        async execute(args: {
+          sessionId: string
+          featureId: string
+          auditorSessionId: string
+          verdict: string
+          summary: string
+          traceId?: string
+        }) {
+          if (args.verdict !== "accept" && args.verdict !== "corrective-worker") {
+            return "[horizon] ERROR: Audit verdict must be 'accept' or 'corrective-worker'."
+          }
+          try {
+            const result = horizon.recordHorizonAudit(
+              args.sessionId,
+              args.featureId,
+              args.verdict,
+              args.auditorSessionId,
+              args.summary,
+              args.traceId || null,
+            )
+            if (!result) return `[horizon] Feature '${args.featureId}' not found.`
+            const feature = result.milestones.flatMap((milestone) => milestone.features)
+              .find((candidate) => candidate.id === args.featureId)!
+            return `[horizon] Independent audit persisted: ${args.verdict}\nReady: ${horizon.horizonFeatureIsReady(feature) ? "yes" : "no"}`
+          } catch (error) {
+            return `[horizon] ERROR: ${error instanceof Error ? error.message : String(error)}`
+          }
         },
       }),
 
@@ -1254,12 +1451,12 @@ export const plugin: Plugin = async ({ client }) => {
         },
       }),
 
-      // HORIZON EVALUATE SUB-AGENT -- 6-dimension weighted self-check
+      // HORIZON EVALUATE SUB-AGENT -- advisory score only
       horizon_evaluate_subagent: tool({
         description:
-          "Evaluate a sub-agent's output across 6 dimensions with weighted scoring. " +
-          "Scores each dimension 0-100. Pass threshold is 75% weighted total. " +
-          "Logs result to decisions.jsonl and updates feature verification state.",
+          "Evaluate supplied sub-agent output across 6 dimensions with advisory weighted scoring. " +
+          "Records the score but cannot set verification passed or readiness; only observed " +
+          "schema-v2 receipt evidence can do that.",
         args: {
           sessionId: tool.schema.string().describe("Session ID"),
           featureId: tool.schema.string().describe(
@@ -1315,53 +1512,44 @@ export const plugin: Plugin = async ({ client }) => {
           const weightedScore = Math.round(
             dims.reduce((sum, d) => sum + d.score * d.weight, 0),
           )
-          const passed = weightedScore >= 75
+          const thresholdMet = weightedScore >= 75
 
           // Build breakdown table
           const breakdown = dims.map(
             (d) => `  ${d.label.padEnd(22)} ${String(d.score).padStart(3)}/100 x ${(d.weight * 100)}% = ${Math.round(d.score * d.weight)}`,
           ).join("\n")
 
-          // Log the evaluation as a decision
-          const verdict = passed ? "PASS" : "FAIL"
+          // Log an advisory evaluation. It cannot manufacture verification evidence.
+          const rating = thresholdMet ? "THRESHOLD MET" : "BELOW THRESHOLD"
           horizon.appendHorizonDecision(args.sessionId, {
             timestamp: new Date().toISOString(),
             feature: args.featureId,
-            ambiguity: `Self-check evaluation for feature ${args.featureId}`,
+            ambiguity: `Advisory self-check for feature ${args.featureId}`,
             researchResult: `6-dimension weighted scoring: ${weightedScore}/100`,
-            decision: `${verdict} (threshold: 75%)`,
+            decision: `${rating} (advisory threshold: 75%)`,
             rationale: breakdown.replace(/\n/g, "; "),
-            confidence: passed ? "high" : "medium",
+            confidence: thresholdMet ? "high" : "medium",
           })
 
-          // Update feature verification state
-          horizon.updateHorizonFeature(args.sessionId, args.featureId, {
-            verification: {
-              passed,
-              testResults: null,
-              issues: passed ? [] : [`Self-check scored ${weightedScore}/100, below 75% threshold`],
-              score: weightedScore,
-            },
-          } as any)
+          // Preserve the observed receipt ID, verdict, and passed state.
+          horizon.recordHorizonEvaluationScore(args.sessionId, args.featureId, weightedScore)
 
           // Progress reporting
           client.app.log({
             body: {
               service: "horizon",
-              level: passed ? "info" : "warn",
+              level: thresholdMet ? "info" : "warn",
               message:
-                `[horizon] Self-check for '${args.featureId}': ${verdict} ` +
-                `(${weightedScore}/100, threshold: 75)`,
+                `[horizon] Advisory self-check for '${args.featureId}': ${rating} ` +
+                `(${weightedScore}/100, advisory threshold: 75)`,
             },
           }).catch(() => {})
 
           return (
-            `[horizon] Self-check evaluation for '${args.featureId}': ${verdict}\n` +
-            `Weighted score: ${weightedScore}/100 (threshold: 75)\n\n` +
+            `[horizon] Advisory self-check for '${args.featureId}': ${rating}\n` +
+            `Weighted score: ${weightedScore}/100 (advisory threshold: 75)\n\n` +
             `Breakdown:\n${breakdown}\n\n` +
-            (passed
-              ? "All dimensions pass. Feature ready for next step."
-              : `Below threshold. Review the low-scoring dimensions and re-dispatch.`)
+            "This score did not change verification passed/readiness; persist an observed schema-v2 receipt."
           )
         },
       }),
@@ -1382,7 +1570,10 @@ export const plugin: Plugin = async ({ client }) => {
         async execute(args: { configJson?: string }) {
           if (args.configJson) {
             try {
-              const updates = JSON.parse(args.configJson)
+              const updates: unknown = JSON.parse(args.configJson)
+              if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
+                throw new Error("configJson must contain a JSON object")
+              }
               const existing = horizon.loadHorizonConfig()
               const merged = { ...existing, ...updates }
               horizon.saveHorizonConfig(merged)
@@ -1491,7 +1682,7 @@ export const plugin: Plugin = async ({ client }) => {
                       `Angles: ${result.angles.length} perspectives\n` +
                       `Reason: ${result.reason}\n\n` +
                       `## DISPATCH INSTRUCTIONS\n` +
-                      `Dispatch ${result.angles.length} sub-agents in PARALLEL via task() -- one per prompt below.\n` +
+                      `Dispatch ${result.angles.length} sub-agents in parallel through the available task tool -- one per prompt below.\n` +
                       `Give each sub-agent its prompt. Collect all critiques as JSON.\n\n` +
                       promptsText + "\n\n" +
                       `## AFTER ROUND 1\n` +
@@ -1535,7 +1726,7 @@ export const plugin: Plugin = async ({ client }) => {
                       `Angles: ${angles.length} critics\n` +
                       `Findings under attack: ${parsedFindings.length}\n\n` +
                       `## DISPATCH INSTRUCTIONS\n` +
-                      `Dispatch ${angles.length} sub-agents in PARALLEL via task() -- one per prompt below.\n` +
+                      `Dispatch ${angles.length} sub-agents in parallel through the available task tool -- one per prompt below.\n` +
                       `Each critic receives ALL other critics' findings and must attack every one.\n\n` +
                       promptsText + "\n\n" +
                       `## AFTER ROUND 2\n` +
@@ -1582,7 +1773,7 @@ export const plugin: Plugin = async ({ client }) => {
                     return (`[hyperplan] ROUND 3: DEFENSE & REFINEMENT\n` +
                       `Critics defending: ${defensePrompts.length}\n\n` +
                       `## DISPATCH INSTRUCTIONS\n` +
-                      `Dispatch ${defensePrompts.length} sub-agents in PARALLEL via task().\n` +
+                      `Dispatch ${defensePrompts.length} sub-agents in parallel through the available task tool.\n` +
                       `Each critic receives ONLY the attacks against their own findings.\n` +
                       `They must DEFEND, REFINE, or CONCEDE each point.\n\n` +
                       promptsText + "\n\n" +
@@ -1622,21 +1813,22 @@ export const plugin: Plugin = async ({ client }) => {
       // TRACE EXPORT -- export current session trace to file
       parallax_trace_export: tool({
         description:
-          "Export the current session's structured reasoning trace to a JSON file. " +
-          "Traces capture protocol phases, writes, verifications, and coherence score. " +
+          "Export the current session's structured protocol and verification trace to a JSON file. " +
+          "Traces capture protocol phases, writes, receipt-linked verdicts, and coherence score. " +
           "Use --pretty for human-readable formatting.",
         args: {
           pretty: tool.schema.boolean().optional().describe(
             "Format output with indentation for human readability",
           ),
         },
-        async execute(args: { pretty?: boolean }) {
-          const sid = sessionId()
+        async execute(args: { pretty?: boolean }, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
           const pretty = args.pretty === true
+          syncVerificationLedger(sid, root)
           const trace = getTrace(sid)
           const breakdown = computeCoherenceScore(trace)
           trace.coherenceScore = breakdown.total
-          const filePath = exportTrace(sid, pretty)
+          const filePath = exportTrace(sid, pretty, root)
 
           return (
             `[parallax] Trace exported: ${filePath}\n` +
@@ -1655,11 +1847,13 @@ export const plugin: Plugin = async ({ client }) => {
           "protocol phases completed, write verification summary, and friction stats. " +
           "The AI should call this at session end and paste the output into the PR.",
         args: {},
-        async execute() {
-          const sid = sessionId()
+        async execute(_args, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
+          syncStateFromDisk(sid, root)
+          syncVerificationLedger(sid, root)
           const trace = getTrace(sid)
           const breakdown = computeCoherenceScore(trace)
-          const s = getFriction()
+          const s = getFriction(sid)
 
           if (trace.writes.length === 0) {
             return (
@@ -1731,17 +1925,19 @@ export const plugin: Plugin = async ({ client }) => {
       // TRACE VIEW -- inline trace viewer (Phase 1.2)
       parallax_trace_view: tool({
         description:
-          "Show the current session's complete reasoning trace in the chat. " +
-          "Displays ambiguity assessment, 4 invariants analysis, verification gate " +
-          "results, every write with pass/fail status, commit decision, and summary. " +
+          "Show the current session's recorded protocol and verification trace in the chat. " +
+          "Displays check-in status, coherence scoring, recorded writes and receipt-linked " +
+          "verdicts, and current friction state. " +
           "Use this when the user asks to see the trace.",
         args: {},
-        async execute() {
-          const sid = sessionId()
+        async execute(_args, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
+          syncStateFromDisk(sid, root)
+          syncVerificationLedger(sid, root)
           const trace = getTrace(sid)
           const breakdown = computeCoherenceScore(trace)
-          const s = getFriction()
-          const p = getProtocol()
+          const s = getFriction(sid)
+          const p = getProtocol(sid)
 
           const stepStatus = (done: boolean, label: string) =>
             done ? `[DONE] ${label}` : `[PENDING] ${label}`
@@ -1764,7 +1960,7 @@ export const plugin: Plugin = async ({ client }) => {
           return [
             `## Parallax Session Trace`,
             `**Session:** \`${sid}\``,
-            `**Mode:** ${getMode().mode.toUpperCase()}`,
+            `**Mode:** ${getMode(sid).mode.toUpperCase()}`,
             ``,
             `### Coherence Score: ${breakdown.total}/100`,
             `  Protocol Coverage:     ${breakdown.protocolCoverage}/30`,
@@ -1802,19 +1998,21 @@ export const plugin: Plugin = async ({ client }) => {
           "state issues, verify cross-context synchronization, or inspect " +
           "the plugin's internal health.",
         args: {},
-        async execute() {
-          const sid = sessionId()
+        async execute(_args, context?: ToolContext) {
+          const { sid, root } = toolRuntime(context)
+          syncStateFromDisk(sid, root)
 
           // Read from in-memory stores
-          const memProtocol = getProtocol()
-          const memMode = getMode()
-          const memFriction = getFriction()
+          const memProtocol = getProtocol(sid)
+          const memMode = getMode(sid)
+          const memFriction = getFriction(sid)
 
           // Read from disk
           const diskState = (() => {
             try {
-              if (existsSync(STATE_FILE)) {
-                return JSON.parse(readFileSync(STATE_FILE, "utf8"))
+              const path = stateFile(root, sid)
+              if (existsSync(path)) {
+                return JSON.parse(readFileSync(path, "utf8"))
               }
             } catch {}
             return null
@@ -1849,7 +2047,7 @@ export const plugin: Plugin = async ({ client }) => {
             `**Agent:** ${currentAgentName || "(none)"}`,
             `**Mode (memory):** ${memMode.mode}`,
             `**Mode (disk):** ${diskMode || "(no file)"}`,
-            `**State file:** ${STATE_FILE}`,
+            `**State file:** ${stateFile(root, sid)}`,
             `**State exists:** ${diskState ? "yes" : "no"}`,
             ``,
             `### Cross-Context Synchronization`,
@@ -1895,8 +2093,15 @@ export const plugin: Plugin = async ({ client }) => {
     // Pre-write enforcement: protocol ordering + friction block
     // -----------------------------------------------------------------------
 
-    "tool.execute.before": async (input: { tool: string; args?: Record<string, unknown> }) => {
+    "tool.execute.before": async (
+      input: { tool: string; sessionID: string; callID: string },
+      output: { args: Record<string, unknown> },
+    ) => {
       if (!["write", "edit", "apply_patch"].includes(input.tool)) return
+      const { sid, root } = activateSession(input.sessionID || "current")
+      // OpenCode exposes mutable tool arguments exclusively on output.args.
+      // Reading input.args here would bypass mutations made by earlier hooks.
+      const args = output.args
 
       // HORIZON ORCHESTRATION EXEMPTION:
       // If the active agent is "horizon" and writing to the Horizon persistence
@@ -1904,12 +2109,12 @@ export const plugin: Plugin = async ({ client }) => {
       // enforcement. Horizon's orchestration writes (plan.json, state.json,
       // research files, skills, decisions) are autonomous operations that
       // should not require Parallax protocol steps.
-      const horizonDir = join(process.cwd(), ".parallax", "horizon")
-      const filePath = input.args?.filePath as string | undefined
+      const horizonDir = horizon.getHorizonDir()
+      const filePath = (args.filePath || args.path) as string | undefined
       if (
-        isAgent("horizon") &&
+        isAgent("horizon", sid) &&
         filePath &&
-        isPathInside(horizonDir, filePath)
+        isPathInside(horizonDir, filePath, root)
       ) {
         return
       }
@@ -1920,11 +2125,11 @@ export const plugin: Plugin = async ({ client }) => {
       // so that subsequent getProtocol() calls return the persisted values, and
       // modifications (like writesBeforeGate++) are captured in-memory for
       // writeState() to persist.
-      syncStateFromDisk()
-      const p = getProtocol()
-      const cfg = loadConfig()
+      syncStateFromDisk(sid, root)
+      const p = getProtocol(sid)
+      const cfg = loadConfig(root)
 
-      if (isStrictMode() && (!p.ambiguityDone || !p.invariantsDone || !p.gateDone)) {
+      if (isStrictMode(root) && (!p.ambiguityDone || !p.invariantsDone || !p.gateDone)) {
         const missing = [
           !p.ambiguityDone ? "Ambiguity Check (Step 1)" : null,
           !p.invariantsDone ? "4 Invariants (Step 2)" : null,
@@ -1941,8 +2146,8 @@ export const plugin: Plugin = async ({ client }) => {
       if (!p.ambiguityDone) {
         throw new Error(
           `[parallax] PROTOCOL VIOLATION: Ambiguity Check (Step 1) not completed.\n` +
-          `You MUST state HIGH/MEDIUM/LOW and ask clarifying questions ` +
-          `before writing code.\n` +
+          `You MUST state HIGH/MEDIUM/LOW before writing code. Ask only when an ` +
+          `essential decision cannot be derived safely; otherwise document assumptions and proceed.\n` +
           `Use parallax_checkin({ step: "ambiguity" }) after completing it.`,
         )
       }
@@ -1960,7 +2165,7 @@ export const plugin: Plugin = async ({ client }) => {
       // Standard/relaxed mode keeps the historical soft invariant behavior.
       if (!p.invariantsDone) {
         p.writesBeforeGate++
-        writeState()
+        writeState(true, sid, root)
         if (p.writesBeforeGate > 3) {
           throw new Error(
             `[parallax] PROTOCOL VIOLATION: 4 Invariants (Step 2) not completed ` +
@@ -1972,14 +2177,8 @@ export const plugin: Plugin = async ({ client }) => {
         }
       }
 
-      // Friction block
-      const s = getFriction()
-      if (s.retriesLeft === 0 && s.lastObservation) {
-        throw new Error(
-          `[parallax] Friction blocked: fix the outstanding issue first.\n` +
-          `${s.lastObservation}`,
-        )
-      }
+      // Verification failures never block the repair write. Every subsequent
+      // write re-enters the same bounded verifier; a pass restores health.
     },
 
     // -----------------------------------------------------------------------
@@ -1988,73 +2187,80 @@ export const plugin: Plugin = async ({ client }) => {
 
     "tool.execute.after": async (input: {
       tool: string
-      args?: Record<string, unknown>
+      sessionID: string
+      callID: string
+      args: Record<string, unknown>
     }) => {
       if (!["write", "edit", "apply_patch"].includes(input.tool)) return
+      const { sid, root } = activateSession(input.sessionID)
 
       // SYNC FROM DISK: Ensure friction state reflects any updates from other
       // execution contexts (tools vs hooks run in separate contexts).
-      syncStateFromDisk()
-      const s = getFriction()
-      if (s.retriesLeft === 0) return
+      syncStateFromDisk(sid, root)
 
-      const sid = sessionId()
+      // Add attribution before resetting the timer: rapid writes form one batch.
+      const changedFiles = changedFilesFromTool(input.tool, input.args || {})
+      const key = verificationBatchKey(root, sid)
+      try {
+        queueVerificationChanges(root, sid, changedFiles)
+      } catch {
+        // Keep an in-memory fallback when persistence is temporarily unavailable.
+        const batch = pendingChangedFiles.get(key) || new Set<string>()
+        for (const file of changedFiles) batch.add(file)
+        pendingChangedFiles.set(key, batch)
+      }
 
-      // Record the file being written for trace
-      const fileName =
-        input.args && typeof input.args.filePath === "string"
-          ? input.args.filePath
-          : input.args && typeof input.args.path === "string"
-            ? input.args.path
-            : `(${input.tool})`
-
-      if (debounceTimer) clearTimeout(debounceTimer)
-      debounceTimer = setTimeout(() => {
-        debounceTimer = null
-        const result = runVerify()
-        if (!result) {
-          addWrite(sid, fileName, "skipped", s.retriesLeft)
-          return
-        }
-        s.trials++
-        if (result.exitCode === 0) {
-          s.successes++
-          s.retriesLeft = MAX_FRICTION_RETRIES
-          s.lastObservation = null
-          addWrite(sid, fileName, "pass", s.retriesLeft)
-          writeState()
+      const pendingVerify = debounceTimers.get(key)
+      if (pendingVerify) clearTimeout(pendingVerify)
+      const verifyTimer = setTimeout(() => {
+        debounceTimers.delete(key)
+        const pending = takePendingBatch(sid, root, false)
+        // A manual verifier in another OpenCode context may already own it.
+        if (pending.changedFiles.length === 0) return
+        try {
+          // Another hook may have reloaded this session while verification was
+          // debounced. Reacquire its live object rather than mutating stale state.
+          syncStateFromDisk(sid, root)
+          const { receipt, friction } = verifyBatch(sid, root, "automatic", pending)
+          const passed = receipt.verdict === "pass"
           client.app
             .log({
               body: {
                 service: "parallax",
-                level: "info",
-                message: `[parallax] Check passed (${s.successes} ok / ${s.trials} trials)`,
+                level: passed ? "info" : "warn",
+                message: passed
+                  ? `[parallax] Check passed for ${receipt.changedFiles.length} file(s) (${friction.successes} ok / ${friction.trials} trials)`
+                  : `[parallax] Check ${receipt.verdict.toUpperCase()} for ${receipt.changedFiles.length} file(s). ${friction.retriesLeft} retries left.`,
+                extra: { receiptId: receipt.id, output: receipt.combined || receipt.skipReason },
               },
             })
             .catch(() => {})
-        } else {
-          s.retriesLeft--
-          s.lastObservation = truncate(result.combined, 2000)
-          addWrite(sid, fileName, "fail", s.retriesLeft)
-          writeState()
-          const lvl = s.retriesLeft === 0 ? "error" : "warn"
-          client.app
-            .log({
-              body: {
-                service: "parallax",
-                level: lvl,
-                message: `[parallax] Check FAILED. ${s.retriesLeft} retries left.`,
-                extra: { output: s.lastObservation },
-              },
-            })
-            .catch(() => {})
+        } catch (error) {
+          client.app.log({
+            body: {
+              service: "parallax",
+              level: "warn",
+              message: "[parallax] Verification engine interrupted; the changed-file batch was retained.",
+              extra: { output: String(error) },
+            },
+          }).catch(() => {})
         }
       }, CHECK_DEBOUNCE_MS)
+      debounceTimers.set(key, verifyTimer)
     },
 
     // -----------------------------------------------------------------------
-    // Event hook: track session ID
+    // Message/event hooks: track the real session and active agent
     // -----------------------------------------------------------------------
+
+    "chat.message": async (input: { sessionID: string; agent?: string }) => {
+      const { sid } = activateSession(input.sessionID)
+      const agent = normalizeAgentName(input.agent)
+      if (agent) {
+        currentAgentName = agent
+        sessionAgentStore.set(sid, agent)
+      }
+    },
 
     event: async (input: {
       event: { type: string; properties?: Record<string, unknown> }
@@ -2062,49 +2268,36 @@ export const plugin: Plugin = async ({ client }) => {
       if (input.event.type === "session.created") {
         const props = input.event.properties || {}
         const info = (props.info || {}) as Record<string, unknown>
-        // Child sessions have a parentID. Only track the root session
-        // for trace recording. Protocol state uses a fixed key and is unaffected.
-        if (info.parentID) return
-
-        currentSessionId =
+        const createdSessionId =
           (info.id as string) ||
           (props.sessionID as string) ||
           (info.sessionID as string) ||
           null
+        const eventRoot = (info.worktree as string) || (info.directory as string) || pluginRoot
+        if (createdSessionId) activateSession(createdSessionId, eventRoot)
 
         // Agent name lives in Session.agent (v2 SDK types.gen.d.ts:590)
         // Normalize to lowercase for case-insensitive matching via isAgent()
         currentAgentName = normalizeAgentName(
           (info.agent as string) || (props.agent as string)
         )
+        if (createdSessionId && currentAgentName) sessionAgentStore.set(createdSessionId, currentAgentName)
 
         // Initialize trace with session info
-        if (currentSessionId) {
-          initTrace(currentSessionId, process.cwd(), detectProject())
-
-        // Carry over protocol state from default if checkins happened before
-        // the session.created event fired (common race on session start).
-        if (protocolStore.has("default")) {
-          protocolStore.set(currentSessionId!, protocolStore.get("default")!)
-          protocolStore.delete("default")
-        }
-        if (frictionStore.has("default")) {
-          frictionStore.set(currentSessionId!, frictionStore.get("default")!)
-          frictionStore.delete("default")
-        }
-        if (modeStore.has("default")) {
-          modeStore.set(currentSessionId!, modeStore.get("default")!)
-          modeStore.delete("default")
-        }
-
-          writeState()
+        if (createdSessionId) {
+          const root = rootForSession(createdSessionId, eventRoot)
+          syncStateFromDisk(createdSessionId, root)
+          initTrace(createdSessionId, root, detectProject(root))
+          writeState(false, createdSessionId, root)
         }
       }
 
       // Track agent switches (TAB to change agent in OpenCode TUI)
       if (input.event.type === "session.next.agent.switched") {
         const props = input.event.properties as Record<string, unknown> | undefined
+        const sid = sessionId((props?.sessionID || props?.sessionId) as string | undefined)
         currentAgentName = normalizeAgentName(props?.agent as string)
+        if (currentAgentName) sessionAgentStore.set(sid, currentAgentName)
       }
 
     },
@@ -2114,11 +2307,12 @@ export const plugin: Plugin = async ({ client }) => {
     // -----------------------------------------------------------------------
 
     "shell.env": async (input: { cwd: string; sessionID?: string }, output: { env: Record<string, string> }) => {
-      syncStateFromDisk()
-      const m = getMode()
-      const s = getFriction()
+      const { sid, root } = activateSession(input.sessionID, worktree || directory || input.cwd)
+      syncStateFromDisk(sid, root)
+      const m = getMode(sid)
+      const s = getFriction(sid)
       output.env.PARALLAX_MODE = m.mode
-      output.env.PARALLAX_SESSION_ID = currentSessionId || ""
+      output.env.PARALLAX_SESSION_ID = sid
       output.env.PARALLAX_FRICTION_RETRIES = String(s.retriesLeft)
     },
 
@@ -2127,25 +2321,23 @@ export const plugin: Plugin = async ({ client }) => {
     // -----------------------------------------------------------------------
 
     "experimental.chat.system.transform": async (
-      _input: unknown,
+      input: { sessionID?: string },
       output: { system?: string[] },
     ) => {
-      // SYNC FROM DISK: This hook runs in a separate execution context from
-      // tools. In-memory Maps are always fresh/empty here. We must read the
-      // persisted state from disk so the system prompt shows the ACTUAL
-      // protocol status (which steps are DONE vs PENDING). Without this,
-      // the agent sees all steps as PENDING even after checkins.
-      syncStateFromDisk()
-      const m = getMode()
-      const s = getFriction()
-      const p = getProtocol()
+      const { sid, root } = activateSession(input.sessionID || "current")
+      // Synchronize exactly the OpenCode session being transformed.
+      syncStateFromDisk(sid, root)
+      const m = getMode(sid)
+      const s = getFriction(sid)
+      const p = getProtocol(sid)
 
       // Phase 2.5: Multi-agent protocol sharing -- carry state to new agent
-      if (currentAgentName) {
+      const activeAgentName = sessionAgentStore.get(sid) || (sid === "current" ? currentAgentName : null)
+      if (activeAgentName) {
         const sys = output.system || (output.system = [])
         sys.push(
           `\n## PARALLAX AGENT CONTEXT\n` +
-          `You are now operating as agent "${currentAgentName}". ` +
+          `You are now operating as agent "${activeAgentName}". ` +
           `Parallax protocol state carries over:\n` +
           `- Mode: ${m.mode.toUpperCase()}\n` +
           `- Ambiguity: ${p.ambiguityDone ? "DONE" : "PENDING"}\n` +
@@ -2196,78 +2388,17 @@ export const plugin: Plugin = async ({ client }) => {
         }
         if (m.mode === "horizon") {
           sys.push(
-            "\n[CORE BEHAVIOR]\n" +
-            "- You plan, research, execute, self-test, and self-iterate until done\n" +
-            "- You NEVER ask the user mid-execution questions. You research and decide.\n" +
-            "- You document all auto-decisions in decisions.jsonl\n" +
-            "- You dispatch sub-agents for implementation work\n" +
-            "- You self-evaluate every sub-agent output across 6 dimensions\n" +
-            "- You run automated tests after every sub-agent\n" +
-            "- You re-plan and retry when verification fails (max 3 cycles)\n" +
-            "- You report progress through client.app.log()\n\n" +
-            "[AUTONOMY RULES -- NON-NEGOTIABLE]\n" +
-            "These are hard rules, not suggestions:\n" +
-            "1. NEVER ask 'should I continue?' -- If the plan has 5 features and you finished feature 1, you IMMEDIATELY start feature 2. No pause. No confirmation. No 'would you like me to proceed?'. Just do it.\n" +
-            "2. NEVER ask 'should I do X?' -- If the plan says do X, you do X. You don't ask permission. You don't suggest. You execute.\n" +
-            "3. NEVER stop mid-plan -- You execute the ENTIRE plan from start to finish. If you complete task A and task B is next, you start task B immediately. The only time you stop is when ALL features in ALL milestones are complete or failed after 3 retry cycles.\n" +
-            "4. NEVER ask for testing approval -- After completing a feature, you run the test suite YOURSELF. You don't ask the user to test it. You test it, evaluate it, fix it if needed, and move on.\n" +
-            "5. Self-iterate without prompting -- If tests fail, you create a corrective sub-plan and dispatch a fix agent. You don't ask the user what went wrong. You figure it out and fix it.\n" +
-            "6. Document, don't ask -- When you make a decision, you LOG it in decisions.jsonl and proceed. You don't ask the user which approach they prefer.\n" +
-            "The ONLY acceptable reasons to pause are: all features complete, a feature failed all 3 retry cycles, or a blocker that literally cannot be resolved without user input (e.g., missing API credentials).\n\n" +
-            "[WORKFLOW]\n" +
-            "1. RESEARCH -- use all MCP tools + codebase analysis before any editing\n" +
-            "2. PLAN -- decompose into milestones + features in plan.json\n" +
-            "3. EXECUTE -- dispatch sub-agents, test, evaluate, iterate. DO NOT STOP UNTIL ALL FEATURES ARE DONE.\n" +
-            "4. AUDIT -- final parallax_debug pass on all work\n\n" +
-            "[SHELL COMMAND TIMEOUTS]\n" +
-            "Some shell commands can hang indefinitely. ALWAYS set a timeout:\n" +
-            "- Quick commands (ls, cat, grep, git status): 30 seconds\n" +
-            "- Build commands (npm run build, cargo build, make): 300 seconds\n" +
-            "- Test commands (npm test, pytest, cargo test): 600 seconds\n" +
-            "- Network commands (npm install, pip install, git clone): 120 seconds\n" +
-            "- Unknown commands: Start with 60 seconds, increase if needed\n" +
-            "If a command times out, log it as a decision, retry once with a longer timeout. If it times out again, flag the issue and move to the next feature. NEVER let a command run forever.\n\n" +
-            "[RESEARCH TOOL DISCOVERY]\n" +
-            "You do not know which MCPs are installed -- they vary per setup. Scan your available tool list and categorize:\n" +
-            "- Documentation tools (names/descriptions mentioning 'docs', 'query', 'resolve library', 'API reference') -- use for library/framework questions\n" +
-            "- Code search tools (mentioning 'grep', 'search', 'code', 'GitHub') -- use for real-world patterns\n" +
-            "- Web fetch tools (mentioning 'fetch', 'URL', 'web', 'markdown') -- use for articles, docs\n" +
-            "- Browser tools -- use for complex interactive pages\n" +
-            "- Codebase tools (read/grep/glob) -- use for project files\n" +
-            "Use the most targeted tool. Never assume any specific MCP is present.\n\n" +
-            "[SUB-AGENT DISPATCH GUIDE]\n" +
-            "When dispatching a sub-agent via task(), you MUST:\n" +
-            "1. Read the plan to get skills.sessionScoped list\n" +
-            "2. Read each skill from ~/.parallax/horizon/sessions/<sessionId>/skills/<name>/SKILL.md\n" +
-            "3. Include the skill content in the task prompt under a '## SESSION-SCOPED SKILLS' section\n" +
-            "4. Tell the sub-agent: 'Follow the patterns and conventions in the attached session-scoped skills. These are project-specific and override general defaults.'\n" +
-            "5. Also include: 'Scan your available tools for research MCPs (documentation queries, code search, web fetching) and use the most appropriate one for each question. Do not assume any specific MCP is present.'\n\n" +
-            "[HORIZON TOOLS]\n" +
-            "- horizon_init_session -- Initialize a new session\n" +
-            "- horizon_write_plan -- Write/update plan.json\n" +
-            "- horizon_read_plan -- Read current plan\n" +
-            "- horizon_update_feature -- Update a feature's status\n" +
-            "- horizon_update_milestone -- Update a milestone's status\n" +
-            "- horizon_write_state -- Write orchestration state\n" +
-            "- horizon_read_state -- Read orchestration state\n" +
-            "- horizon_append_decision -- Log an autonomous decision\n" +
-            "- horizon_read_decisions -- Read decision log\n" +
-            "- horizon_write_research -- Write research findings\n" +
-            "- horizon_read_research -- Read research findings\n" +
-            "- horizon_create_skill -- Create session-scoped skill\n" +
-            "- horizon_list_skills -- List session-scoped skills\n" +
-            "- horizon_save_trace -- Archive sub-agent trace\n" +
-            "- horizon_list_sessions -- List all Horizon sessions\n" +
-            "- horizon_evaluate_subagent -- 6-dimension weighted self-check (pass >= 75%)\n" +
-            "- horizon_session_status -- Comprehensive session status\n" +
-            "- horizon_config -- Read/write Horizon config\n\n" +
-            "[OTHER TOOLS]\n" +
-            "- task() to dispatch sub-agents (include MCP tool reference in prompt)\n" +
-            "- parallax_plan/build/debug for complex sub-agent configuration\n" +
-            "- parallax_verify for automated verification\n" +
-            "- todowrite for plan tracking\n\n" +
-            "[PERSISTENCE]\n" +
-            "All state at ~/.parallax/horizon/sessions/<id>/",
+            "\n## HORIZON VERIFIED CHANGE LOOP\n\n" +
+            "Horizon provides durable, prompt-driven supervision; it is not a background daemon or a completion guarantee.\n\n" +
+            "### PREFLIGHT\n" +
+            "Read repository instructions, current code/tests, and resumable state. Classify ambiguity. Ask only when an essential decision cannot be derived safely from evidence or user-only access blocks work; bundle related questions. OpenCode permission prompts are authoritative and autonomy settings do not bypass ask or deny. Complete ambiguity, invariants, and gate check-ins before project writes.\n\n" +
+            "### CHANGE\n" +
+            "For every atomic feature, dispatch one horizon-worker and wait; observe and persist its schema-v2 receipt ID/verdict; dispatch one read-only horizon-auditor and wait; then accept only with an observed pass plus auditor accept, otherwise use one corrective worker within the retry budget. At most one task is active: overlap, parallel dispatch, generic roles, and worker self-audit are forbidden. Keep detail in child traces and return only bounded structured summaries.\n\n" +
+            "### VERIFY\n" +
+            "Persist the observed schema-v2 receipt with horizon_record_verification before auditing. Only pass is passing evidence; fail, skipped, and unknown remain limitations. Self-reported scores and audit recommendations never replace receipt evidence or set readiness.\n\n" +
+            "### RECEIPT\n" +
+            "Persist and report changed files, acceptance status, exact checks and verdicts, receipt IDs, decisions, and residual risk. Separate completed, failed, skipped, and blocked work, and identify resumable state.\n\n" +
+            "Discover tools from the current session rather than assuming an MCP or browser exists. State is under ~/.parallax/horizon/sessions/<id>/ and advances only while OpenCode is running and permissions are granted.",
           )
 
           // SESSION RESTART RECOVERY: detect existing sessions for resume
@@ -2316,19 +2447,19 @@ export const plugin: Plugin = async ({ client }) => {
     // -----------------------------------------------------------------------
 
     "experimental.session.compacting": async (
-      _input: unknown,
+      input: { sessionID: string },
       output: { context?: string[] },
     ) => {
-      // SYNC FROM DISK: Same context isolation issue as system.transform.
-      syncStateFromDisk()
-      const s = getFriction()
-      const m = getMode()
-      const p = getProtocol()
-      const sid = sessionId()
+      const { sid, root } = activateSession(input.sessionID)
+      syncStateFromDisk(sid, root)
+      const s = getFriction(sid)
+      const m = getMode(sid)
+      const p = getProtocol(sid)
 
       // Export trace to disk on compaction
       try {
-        exportTrace(sid)
+        syncVerificationLedger(sid, root)
+        exportTrace(sid, false, root)
       } catch {
         // Non-fatal: trace export is best-effort
       }

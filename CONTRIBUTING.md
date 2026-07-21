@@ -1,91 +1,92 @@
 # Contributing to Parallax Engine
 
-OpenCode plugin -- friction-loop verification, protocol enforcement, mode switching (plan/build/debug), and structured reasoning traces.
+Parallax is an OpenCode plugin for verified, evidence-bearing changes. Keep contributions scoped, test observable behavior, and leave the repository release-ready.
 
-## Quick Start
+## Start here
 
 ```bash
 git clone https://github.com/Master0fFate/parallax-opencode.git
 cd parallax-opencode
-npm install --ignore-scripts
+npm ci --ignore-scripts
+npm run typecheck
 npm test
 ```
 
-## Development Workflow
+Node.js 20+ is required. The real integration test uses the repository's locked OpenCode 1.18.x development dependency and does not use your OpenCode config or credentials.
 
-1. **TypeScript only** -- All source in `src/`. No raw JS files.
-2. **Typecheck before commit** -- `npm run typecheck` must pass.
-3. **All tests pass** -- `npm test` must pass (110+ tests across 8 files).
-4. **Build works** -- `npm run build:all` produces both `dist/` and `dist-standalone/`.
-5. **Install locally** -- Run `node scripts/install.mjs` or copy `dist-standalone/parallax-engine.js` to `~/.config/opencode/plugins/` then reload OpenCode.
+## Change loop
 
-### Running Checks
+1. Read the relevant source, nearby tests, and current workspace diff.
+2. Define measurable acceptance criteria and preserve unrelated behavior.
+3. Make the smallest coherent change; avoid churn-only moves.
+4. Add or update targeted tests.
+5. Run the narrow check first, then the complete release gate before a release-ready handoff.
+6. Report changed files, exact commands and verdicts, and remaining risk.
 
-```bash
-npm run typecheck           # TypeScript validation (tsc --noEmit)
-npm test                    # Run all vitest tests (110+)
-npm run build               # Compile to dist/
-npm run build:standalone    # Bundle plugin via esbuild
-npm run build:all           # Build + standalone (run before publish)
-```
+TypeScript implementation lives in `src/`; release/lifecycle automation lives in `scripts/`; installed prompts live in `agents/` and `skills/`. Update user documentation when behavior or defaults change.
 
-## Code Structure
-
-```
-src/
-  plugin.ts     -- Main plugin (29 tools + 8 hooks + state management, ~2300 lines)
-  types.ts      -- Shared type definitions
-  detect.ts     -- Project type detection
-  trace.ts      -- Trace recording, session management
-  score.ts      -- Coherence score computation
-  horizon.ts    -- Horizon persistence layer (517 lines)
-  hyperplan.ts  -- Hyperplan adversarial debate engine
-  cli.ts        -- CLI entry point (CI-only)
-  tests/        -- Vitest test files (8 files, 110+ tests)
-agents/
-  parallax.md   -- Parallax agent definition (self-contained)
-  horizon.md    -- Horizon agent definition (self-contained)
-skills/
-  parallax-plan/   -- PLAN mode skill (Precision Architect)
-  parallax-debug/  -- DEBUG mode skill (Universal Auditor)
-```
-
-## Plugin Architecture Notes
-
-### Cross-Context Execution
-
-OpenCode loads plugin modules in separate execution contexts for custom tools vs hooks. In-memory Maps (`Map<string, T>`) are NOT shared across contexts.
-
-**The fix:** `syncStateFromDisk()` reads `~/.parallax/state.json` and updates ALL in-memory stores (protocol, mode, friction). Called in every hook before reading state.
-
-### Agent Definitions vs Skills
-
-- `agents/*.md` -- Self-contained agent definitions. Always loaded when agent tab is active.
-- `skills/parallax-*.md` -- Mode-specific skills. Injected only when mode is activated via `parallax_plan` or `parallax_debug`.
-- Base skills (parallax, horizon) are merged into agent definitions. Only mode-specific skills remain as separate files.
-
-### State File Location
-
-Plugin process cwd is the user home directory (`~`), not the project root. All runtime state lives at `~/.parallax/`. The project `.parallax/` is CLI-only and gitignored.
-
-## Pull Request Guidelines
-
-- One feature/fix per PR
-- Include tests for new functionality
-- Update README.md if user-facing behavior changes
-- No regressions in existing tests (110+ must pass)
-- Keep the coherence score logic consistent
-
-## Publishing
+## Checks
 
 ```bash
-npm version patch
-npm run build:all
-npm test
-git push && git push --tags
-npm publish
+npm run typecheck             # TypeScript validation
+npm test                      # Vitest suite
+npm test -- --coverage        # Full suite with coverage
+npm run build:all             # ESM declarations + standalone bundle
+npm run test:pack             # Pack, install, and import the npm artifact
+npm run test:opencode         # Discover tools in isolated real OpenCode
+npm run audit:release         # High-severity production dependency audit
+npm run release:check         # Complete fail-closed release gate
 ```
+
+The packed-artifact and OpenCode checks use temporary directories and clean them up. They must not depend on global package links, user configuration, user credentials, generated files left in the repository, or network model access.
+
+## Repository boundaries
+
+```text
+agents/                  installed OpenCode agent definitions
+skills/                  installed mode guidance
+src/plugin.ts            hooks and plugin tool surface
+src/verification.ts      verification receipts and changed-file batching
+src/config.ts            project configuration validation/defaults
+src/detect.ts            deterministic bounded check discovery
+src/horizon.ts           Horizon persistence
+src/hyperplan.ts         optional adversarial planning engine
+src/trace.ts             trace recording/export
+src/score.ts             coherence score calculation
+src/cli.ts               automation and trace CLI
+src/tests/               behavioral and contract tests
+scripts/install.mjs      explicit managed installer lifecycle
+scripts/pack-smoke.mjs   package-content/public-import proof
+scripts/opencode-e2e.mjs real OpenCode integration proof
+scripts/publish.mjs      local release workflow
+```
+
+OpenCode can load custom tools and hooks in separate execution contexts. Do not assume module-level maps are shared. Session identity and workspace-local state under `.parallax/sessions/<session-id>/` are the cross-context source of truth. Horizon orchestration state is separate under `~/.parallax/horizon/`.
+
+Do not commit or stage `.parallax/`, dependencies, build output, coverage, caches, logs, credentials, or package tarballs. Before handoff, inspect both `git status --short` and the staged file list.
+
+## Pull requests
+
+- Keep one coherent feature or fix per pull request.
+- Include regression coverage for behavior changes.
+- Preserve explicit failure semantics: only a `pass` verification receipt is passing evidence.
+- Keep OpenCode permissions authoritative; agent autonomy must not bypass `ask` or `deny`.
+- Avoid exact tool/test/line counts in docs because they become stale; document contracts and commands instead.
+- Update `README.md`, `CHANGELOG.md`, package metadata, workflow gates, or `Horizons.spec.md` when their story changes.
+
+## Releases
+
+Do not publish from an unverified tree or bypass lifecycle scripts without first running the same release gate in that environment.
+
+```bash
+npm run release:dry           # Full gate plus npm publish --dry-run
+npm run release:patch         # Bump package/lock, verify, authorize, publish
+```
+
+A release requires synchronized package and lockfile versions, passing typecheck and coverage, both builds, packed import/install proof, real OpenCode integration, and audit. The local publisher checks npm identity and package ownership before publication and verifies registry metadata afterward. Tagged releases run the same gate through [`.github/workflows/publish.yml`](.github/workflows/publish.yml).
+
+If authentication, ownership, two-factor authentication, provenance, or registry access blocks publishing, report the exact npm error and do not claim publication.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions are licensed under the MIT License.

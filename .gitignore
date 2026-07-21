@@ -1,18 +1,31 @@
-# Dependencies
+# Dependencies and package-manager caches
 node_modules/
+.npm/
+.npm-cache/
+.cache/
 
 # Compiled output
 dist/
 dist-standalone/
 
-# Environment
+# Environment and local credentials
 .env
 .env.*
 !.env.example
+.npmrc
+*.pem
+*.key
 
-# Logs
+# Logs and temporary files
 *.log
 npm-debug.log*
+*.tmp
+.tmp/
+tmp/
+
+# Release archives (npm pack output must remain temporary)
+*.tgz
+*.tar.gz
 
 # OS
 .DS_Store
@@ -32,8 +45,3 @@ data/*.sqlite
 
 # Test coverage
 coverage/
-
-# Data assets (screenshots, etc.)
-data/*.png
-data/*.jpg
-data/*.jpeg

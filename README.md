@@ -1,491 +1,278 @@
-# PARALLAX ENGINE
+<p align="center">
+  <img src="./data/parallaxtui.png" alt="Parallax Engine" width="220" />
+</p>
 
-**OpenCode plugin** -- protocol enforcement, mode switching (plan/build/debug/horizon), structured reasoning traces, friction-loop verification, and autonomous long-horizon supervision.
+<h1 align="center">Parallax Engine</h1>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+<p align="center"><strong>OpenCode changes you can prove.</strong></p>
+
+**A verified change loop for OpenCode:** preflight the task, make the change, run a bounded project check, and leave a durable receipt.
+
+[![CI](https://github.com/Master0fFate/parallax-opencode/actions/workflows/ci.yml/badge.svg)](https://github.com/Master0fFate/parallax-opencode/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/parallax-opencode)](https://www.npmjs.com/package/parallax-opencode)
-[![Tests](https://img.shields.io/badge/tests-118%20passing-brightgreen)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
----
+Release proof is fail-closed: the packed npm artifact is installed and imported, then loaded by a credential-free **real OpenCode 1.18.x process** that must discover Parallax tools.
 
-## Install
+## 30-second demo
 
-```bash
-npx parallax-opencode
-```
-
-This explicit installer copies the Parallax/Horizon agents, copies the packaged
-mode skills, and creates or updates `~/.config/opencode/opencode.json` with the
-`"parallax-opencode"` plugin entry. Restart OpenCode after install.
-
-Package installation itself has no lifecycle side effects; `npm install
-parallax-opencode` will not mutate your OpenCode config. Runtime Horizon state is
-stored under `~/.parallax/horizon/`; project-local Parallax traces/state are
-stored under `.parallax/` in the active workspace.
-
-### Update
+Requires Node.js 20+ and OpenCode 1.18.x.
 
 ```bash
-npx parallax-opencode@latest
+npx parallax-opencode@latest install
+npx parallax-opencode@latest doctor
+opencode .
 ```
 
-Restart OpenCode so the updated plugin package and copied agent files are loaded.
+Give OpenCode its first task:
 
-### Uninstall
+> Use Parallax to add one focused test for the smallest uncovered edge case in this repository. Verify it and report the receipt ID.
 
-Remove `"parallax-opencode"` from `~/.config/opencode/opencode.json`, then delete
-the copied files if desired:
+Parallax guides OpenCode through **PREFLIGHT → CHANGE → VERIFY → RECEIPT**. Restart OpenCode after a first install so copied agents and skills are loaded.
+
+---
+
+## Why Parallax
+
+AI-generated changes are easy to produce and hard to trust. Parallax makes the evidence part of the workflow:
+
+1. **PREFLIGHT** — inspect repository evidence, state acceptance criteria, classify ambiguity, and complete readiness check-ins.
+2. **CHANGE** — make the smallest coherent change under OpenCode's configured permissions.
+3. **VERIFY** — detect and run one bounded project check for the changed-file batch.
+4. **RECEIPT** — persist the command, arguments, duration, exit code, verdict, changed files, and bounded output.
+
+Only `pass` is passing evidence. `fail`, `skipped`, and `unknown` remain visible. OpenCode `ask` and `deny` permissions are always authoritative.
+
+### Choose a working mode
+
+| Mode | Use it for |
+|---|---|
+| **Parallax / PLAN** | Scoping acceptance criteria and checks |
+| **Parallax / BUILD** | Focused implementation (default build mode) |
+| **Parallax / DEBUG** | Evidence-led investigation and remediation |
+| **Horizon** | Milestone-based work that must persist and resume across invocations |
+
+Horizon is durable, prompt-driven supervision—not a background daemon or a guarantee of unattended completion. It advances only while OpenCode is running, the agent is active, tools are available, and permissions are granted.
+
+## Install and lifecycle
+
+The package has no install-time configuration side effects. The explicit installer validates JSON/JSONC before mutation, writes atomically, backs up customized files, records managed ownership, and is safe to repeat.
 
 ```bash
-rm -rf ~/.config/opencode/agents/parallax.md \
-       ~/.config/opencode/agents/horizon.md \
-       ~/.config/opencode/skills/parallax-plan \
-       ~/.config/opencode/skills/parallax-debug
+npx parallax-opencode@latest install
+npx parallax-opencode@latest status --json
+npx parallax-opencode@latest doctor --json
+npx parallax-opencode@latest uninstall --dry-run
+npx parallax-opencode@latest uninstall
 ```
 
-On Windows, remove the same paths under `%USERPROFILE%\.config\opencode`.
+Use `--config-dir <path>` or `OPENCODE_CONFIG_DIR` for a non-default OpenCode config root. Run `npx parallax-opencode@latest help` for the complete lifecycle interface.
 
----
+The installer registers `"parallax-opencode"` and copies these packaged assets into the selected OpenCode config root:
 
-## What It Does
-
-### Two Agent Modes
-
-The plugin provides **two agent tabs**, switch between them with `[Tab]`:
-
-| Agent | Mode | When to Use |
-|---|---|---|
-| **Parallax** | Plan / Build / Debug | Interactive reasoning with protocol enforcement |
-| **Horizon** | Autonomous Supervisor | Multi-hour/multi-day unattended execution |
-
----
-
-### PARALLAX AGENT -- Protocol Enforcement (6 steps)
-
-The Parallax agent follows a structured reasoning protocol before writing code. The plugin enforces this via the `tool.execute.before` hook:
-
-| Step | Checkin | What it blocks |
-|---|---|---|
-| 1. Ambiguity Check | `parallax_checkin("ambiguity")` | All writes until done |
-| 2. 4 Invariants | `parallax_checkin("invariants")` | All writes until done in default strict mode |
-| 3. Verification Gate | `parallax_checkin("gate")` | All writes until done in default strict mode |
-| 4. Design Doc (opt-in) | `parallax_checkin("design")` | Per project via config |
-| 5. Commit Decision | `parallax_checkin("commit")` | Any time after gate |
-| 6. Summary | `parallax_checkin("summary")` | Generates retrospective |
-
-### Mode Switching
-
-| Mode | Tool | When |
-|---|---|---|
-| PLAN | `parallax_plan` | Vague requirements, before writing code |
-| BUILD | `parallax_build` | Executing, writing code (default) |
-| DEBUG | `parallax_debug` | Post-build quality and security audit |
-| HORIZON | `parallax_horizon` | Long-horizon autonomous supervision |
-
-### Friction Loop
-
-After every write, the plugin auto-runs project verification. On failure, it decrements a retry counter. After 3 consecutive failures, it blocks further writes until the issue is resolved.
-
-### Trace Recording
-
-Every session produces a structured reasoning trace -- phases, writes, verification results. The AI can export it to JSON or generate a PR-ready markdown summary.
-
-### The 4 Invariants
-
-| Question | Why It Matters |
-|---|---|
-| Where does state live? | Ownership & truth, consistency, blast radius |
-| Where does feedback live? | Observability, debugging, monitoring |
-| What breaks if I delete this? | Coupling & fragility, safe refactoring |
-| When does timing matter? | Async & ordering, race conditions, correctness |
-
-Based on [@acidgreenservers AGENTS.md](https://gist.github.com/acidgreenservers/001185d63e5cd65f9fbe6f7a1c70a200)
-
----
-
-### HORIZON AGENT -- Autonomous Long-Horizon Supervisor
-
-The **Horizon** agent is a prompt-driven project supervisor for multi-hour/multi-day tasks. The plugin provides durable planning, research, decision-log, skill, trace, and evaluation tools; the Horizon agent uses those tools to plan, research, execute, self-test, and self-iterate without mid-execution user input.
-
-#### Workflow
-
-| Phase | What Happens |
-|---|---|
-| 1. RESEARCH | Parses goal, web searches best practices, analyzes codebase, synthesizes findings |
-| 2. PLAN | Decomposes goal into milestones + features with acceptance criteria and complexity estimates |
-| 3. EXECUTE LOOP | Dispatches sub-agents, runs tests, self-evaluates across 6 dimensions, retries up to 3x per feature |
-| 4. FINAL AUDIT | Runs Universal Auditor, full test suite, exports traces, generates completion report |
-
-#### Self-Check Evaluation (6 Dimensions)
-
-After every sub-agent, Horizon scores output across 6 weighted dimensions:
-
-| Dimension | Weight | Check |
-|---|---|---|
-| Protocol Integrity | 15% | All Parallax steps completed? |
-| Verification | 25% | Tests pass? No lint errors? |
-| Correctness | 25% | Matches acceptance criteria? |
-| Design Quality | 15% | AI slop detected? |
-| Edge Case Coverage | 10% | Error paths handled? |
-| User Perspective | 10% | Intuitive for all skill levels? |
-
-**Pass threshold:** >= 75% weighted score. Automatic retry on failure (up to 3 cycles).
-
-#### Autonomous Decision Engine
-
-When Horizon encounters ambiguity, it autonomously:
-1. Identifies the ambiguity
-2. Researches (web search, codebase, project conventions)
-3. Decides using best-guess heuristics (preferring conservative defaults)
-4. Documents the decision in `decisions.jsonl` for post-hoc review
-5. Proceeds without blocking
-
-#### Autonomy Levels
-
-| Level | Behavior |
-|---|---|
-| `full` | No user interaction. All decisions auto-resolved. |
-| `semi` | Milestone boundaries require user approval. |
-| `supervised` | Every feature requires user approval before dispatch. |
-
----
-
-### HYPERPLAN -- Adversarial Plan Hardening
-
-The **Hyperplan** engine hardens plans against blind spots before execution begins. It runs a structured 3-round debate among 5 adversarial critics, then synthesizes the results into an insight bundle.
-
-The `parallax_hyperplan` plugin tool is the interface -- it generates prompts for each round and synthesizes the final result. The agent dispatches sub-agents in parallel via `task()`.
-
-#### When to Use
-
-| Complexity Score | Auto-Behavior | force=true |
-|---|---|---|
-| < 3 (trivial) | Skip -- no debate needed | Run anyway |
-| 3-5 (moderate) | 2 critical angles (Integration Tester + Sentinel) | All 5 angles |
-| > 5 (complex) | All 5 angles | All 5 angles |
-
-#### The 3-Round Debate
-
-| Round | What Happens | Agent Action |
-|---|---|---|
-| **1. Analysis** | Each critic independently analyzes the plan from their angle, producing findings with severity (critical/major/minor) and self-critique | Dispatch N sub-agents in parallel via `task()` |
-| **2. Cross-Attack** | Each critic attacks the other critics' findings. Must resolve to DEFEND / REFINE / CONCEDE | Dispatch N sub-agents with each others' findings |
-| **3. Defense** | Each critic defends/refines/concedes their own attacked findings. DEFEND requires evidence; REFINE produces stronger version; CONCEED states what survives | Dispatch N sub-agents with their attacks |
-| **Synthesize** | Engine aggregates all 3 rounds into an insight bundle with confidence scoring and provenance tracking | Single call to `parallax_hyperplan` |
-
-#### The 5 Adversarial Angles
-
-| Angle | ID | Severity | Attacks |
-|---|---|---|---|
-| **Pragmatist** | `pragmatist` | major | Feasibility, timeline, resourcing, real-world constraints |
-| **Integration Tester** | `integration` | critical | Interfaces, contracts, integration points, data flow |
-| **Sentinel** | `sentinel` | critical | Security, error handling, edge cases, failure modes |
-| **Architectural Strategist** | `architect` | major | Cohesion, coupling, scalability, technology choices |
-| **Humanist** | `humanist` | major | UX, DX, cognitive load, accessibility, onboarding |
-
-#### Confidence Scoring
-
-The insight bundle includes a quantitative confidence score (0-100) calibrated by adversarial severity:
-
-- Each **critical** finding: -15 points
-- Each **major** finding: -8 points
-- Each **minor** finding: -3 points
-- Round 3 concede adjustments: further reductions
-
-#### Usage Workflow
-
-```bash
-# ROUND 1: Generate analysis prompts
-parallax_hyperplan({ mode: "generate", plan: "...", force: true })
-
-# --> Dispatch N sub-agents with each prompt, collect critiques
-
-# ROUND 2: Generate cross-attack prompts
-parallax_hyperplan({ mode: "generate", round: "cross-attack", plan: "...", findings: "<all findings JSON>" })
-
-# --> Dispatch N sub-agents, collect responses
-
-# ROUND 3: Generate defense prompts
-parallax_hyperplan({ mode: "generate", round: "defense", plan: "...", attacks: "<attacks JSON>" })
-
-# --> Dispatch N sub-agents, collect defenses
-
-# SYNTHESIZE: Produce insight bundle
-parallax_hyperplan({ mode: "synthesize", plan: "...", critiques: "<all critiques JSON>" })
+```text
+agents/parallax.md
+agents/horizon.md
+agents/horizon-worker.md
+agents/horizon-auditor.md
+skills/parallax-plan/SKILL.md
+skills/parallax-debug/SKILL.md
 ```
 
-#### Insight Bundle Output
+Uninstall removes only registration and assets proven to be installer-managed. Customized assets, unrelated settings, and backups are preserved.
 
-The synthesized bundle contains 4 categories:
+## Verification evidence and state
 
-| Category | Description |
-|---|---|
-| **Hard Constraints** | Non-negotiable requirements surfaced by critics |
-| **Decisions** | Trade-offs with supporting rationale |
-| **Risks** | Identified failure modes with severity and mitigation |
-| **Open Questions** | Gaps requiring further research |
+Project-local runtime evidence is written under the active workspace:
 
-Each insight tracks its adversarial provenance (which angle raised it, how it survived cross-attack and defense rounds).
-
----
-
-## Plugin Tools
-
-These are called by the AI in OpenCode chat:
-
-### Parallax Tools (11)
-
-| Tool | Purpose |
-|---|---|
-| `parallax_verify` | Run project verification |
-| `parallax_analyze` | Multi-perspective analysis on a topic |
-| `parallax_checkin` | Mark a protocol step complete |
-| `parallax_plan` / `_build` / `_debug` / `_horizon` | Switch modes (plan, build, debug, horizon) |
-| `parallax_hyperplan` | Multi-round adversarial plan hardening (3-round debate + synthesis) |
-| `parallax_trace_export` | Export session trace to JSON |
-| `parallax_trace_pr_comment` | Generate trace as PR-ready markdown |
-| `parallax_trace_view` | Show full reasoning trace inline |
-
-### Horizon Tools (18)
-
-#### Session Management
-| Tool | Purpose |
-|---|---|
-| `horizon_init_session` | Initialize session directory + plan.json, state.json, decisions.jsonl, research/, skills/, traces/ |
-| `horizon_list_sessions` | List all Horizon sessions from the index |
-| `horizon_session_status` | Full status snapshot (plan, state, decisions, research, skills, traces) |
-
-#### Plan Management
-| Tool | Purpose |
-|---|---|
-| `horizon_write_plan` | Write/update plan.json (milestones + features) |
-| `horizon_read_plan` | Read current plan with progress (% complete) |
-| `horizon_write_state` | Write orchestration state (phase, active items) |
-| `horizon_read_state` | Read current orchestration state |
-
-#### Feature/Milestone Tracking
-| Tool | Purpose |
-|---|---|
-| `horizon_update_feature` | Update feature status + auto-recalculate stats + retry cap enforcement |
-| `horizon_update_milestone` | Update milestone status |
-
-#### Decision Audit
-| Tool | Purpose |
-|---|---|
-| `horizon_append_decision` | Log auto-decision to decisions.jsonl |
-| `horizon_read_decisions` | Read the full decision audit log |
-
-#### Research Cache
-| Tool | Purpose |
-|---|---|
-| `horizon_write_research` | Write findings.md + sources.json |
-| `horizon_read_research` | Read cached research |
-
-#### Session-Scoped Skills
-| Tool | Purpose |
-|---|---|
-| `horizon_create_skill` | Create a session-scoped skill (SKILL.md + plan.json registration) |
-| `horizon_list_skills` | List session-scoped skills |
-
-#### Sub-Agent Evaluation
-| Tool | Purpose |
-|---|---|
-| `horizon_evaluate_subagent` | Score sub-agent output across 6 dimensions (0-100 each) |
-
-#### Trace Archiving
-| Tool | Purpose |
-|---|---|
-| `horizon_save_trace` | Archive a sub-agent trace in traces/ |
-
-#### Configuration
-| Tool | Purpose |
-|---|---|
-| `horizon_config` | Read or write Horizon global configuration |
-
----
-
-## CLI (CI Only)
-
-The `parallax` CLI is for CI pipelines and automation, not for interactive use:
-
-```bash
-parallax gate --min-score 70       # CI coherence gate (exit code 0/1)
-parallax pre-commit                # Git pre-commit hook wrapper
-parallax init                      # Create .parallax/ config dir
-npx parallax-opencode              # Install the plugin (alias for init)
+```text
+.parallax/
+├── config.json                         optional project config
+├── verification-ledger.jsonl           schema-v2 verification receipts
+├── sessions/<open-code-session>/       protocol state and pending verification batches
+├── traces/                             exported session traces
+└── scores.jsonl                        optional CLI score history
 ```
 
----
+Horizon orchestration state is separate and durable:
 
-## Architecture
-
-```
-Parallax Agent (system prompt)
-  |
-  +-- Plugin hooks (8)
-  |     event                       --> session ID + agent switches
-  |     tool.execute.before         --> protocol enforcement + friction + design doc gate
-  |     tool.execute.after          --> auto-verify + trace recording + state persistence
-  |     experimental.chat.system.transform --> protocol status + mode skill + agent context
-  |     experimental.session.compacting     --> state preservation + trace export
-  |     shell.env                   --> PARALLAX_MODE, PARALLAX_SESSION_ID in shell
-  |
-  +-- Parallax custom tools (11)
-  |     parallax_verify, parallax_analyze, parallax_checkin,
-  |     parallax_plan / _build / _debug / _horizon,
-  |     parallax_hyperplan,
-  |     parallax_trace_export / _pr_comment / _view
-  |
-  +-- Horizon custom tools (18)
-  |     horizon_init_session, horizon_list_sessions, horizon_session_status,
-  |     horizon_write_plan, horizon_read_plan, horizon_write_state, horizon_read_state,
-  |     horizon_update_feature, horizon_update_milestone,
-  |     horizon_append_decision, horizon_read_decisions,
-  |     horizon_write_research, horizon_read_research,
-  |     horizon_create_skill, horizon_list_skills,
-  |     horizon_save_trace,
-  |     horizon_config,
-  |     horizon_evaluate_subagent
-  |
-  +-- Parallax State (~/.parallax/)
-  |     state.json                  protocol state (immediate on checkins)
-  |     traces/                     per-session JSON traces
-  |     scores.jsonl                append-only score history
-  |     config.json                 per-project config (optional)
-  |
-  +-- Horizon State (~/.parallax/horizon/)
-        config.json                global Horizon config
-        index.json                 session UUID -> goal summaries
-        sessions/<uuid>/
-          plan.json                structured plan (milestones + features)
-          state.json               orchestration state
-          decisions.jsonl          auto-decision audit log
-          research/
-            findings.md            synthesized research summary
-            sources.json           URL references with key excerpts
-          skills/<name>/SKILL.md   session-scoped skills
-          traces/                  sub-agent trace exports
+```text
+~/.parallax/horizon/
+├── config.json
+├── index.json
+└── sessions/<horizon-session>/
+    ├── plan.json
+    ├── state.json
+    ├── decisions.jsonl
+    ├── research/
+    ├── skills/
+    └── traces/
 ```
 
----
+Both locations are runtime state. `.parallax/` is gitignored by this repository and should not be committed in consumer projects.
 
-## Project Config
+## Configuration
 
-Create `.parallax/config.json` in your project root:
+Create `.parallax/config.json` in the project root only when overriding defaults:
 
 ```json
 {
-  "strictness": "standard",
+  "strictness": "strict",
   "minScore": 70,
+  "adaptiveProtocol": false,
   "designDocRequired": false,
-  "trivialPatterns": ["*.md", "*.json"],
-  "highRiskPatterns": ["**/auth/**", "**/*.env*"]
+  "trivialPatterns": [],
+  "highRiskPatterns": []
 }
 ```
 
-| Key | Default | Description |
-|---|---|---|
-| `strictness` | `"standard"` | `"strict"` / `"standard"` / `"relaxed"` |
-| `minScore` | `70` | Gate threshold for CI |
-| `designDocRequired` | `false` | Block writes until design doc produced |
-| `trivialPatterns` | `[]` | File patterns considered low-risk |
-| `highRiskPatterns` | `[]` | Patterns always requiring full protocol |
+| Key | Default | Meaning |
+|---|---:|---|
+| `strictness` | `"strict"` | Runtime write gate: `strict`, `standard`, or `relaxed` |
+| `minScore` | `70` | Minimum score used by the CLI gate |
+| `adaptiveProtocol` | `false` | Reserved compatibility flag; the default keeps the fixed workflow |
+| `designDocRequired` | `false` | Requires the design readiness check before writes |
+| `trivialPatterns` | `[]` | Project-defined low-risk file patterns |
+| `highRiskPatterns` | `[]` | Project-defined patterns that require full protocol |
 
----
+Unknown fields and malformed values fail explicitly rather than silently weakening enforcement.
 
-## Source Layout
+## How it fits together
 
-```
-parallax_plugin/
-  agents/
-    parallax.md                   # Parallax agent definition
-    horizon.md                    # Horizon agent definition
-  src/
-    plugin.ts                     # Plugin (~2100 lines, 29 tools)
-    types.ts                      # Shared types (Horizon + Hyperplan types)
-    horizon.ts                    # Horizon persistence module (512 lines)
-    hyperplan.ts                  # Hyperplan engine -- complexity detection, 3-round debate, insight bundle synthesis
-    detect.ts                     # Project detection
-    trace.ts                      # Trace recording + export
-    score.ts                      # Coherence score + analytics
-    cli.ts                        # CLI (CI only)
-    tests/
-      hyperplan.test.ts           # 43 tests (complexity, prompts, cross-attack, defense, synthesis)
-      horizon.test.ts             # 26 tests
-      trace.test.ts               # 6 tests
-      protocol.test.ts            # 5 tests
-      score.test.ts               # 5 tests
-      detect.test.ts              # 7 tests
-      friction.test.ts            # 7 tests
-  dist-standalone/                # Bundled plugin (~76KB)
-  skills/
-    parallax/                     # Parallax protocol skills
-    parallax-plan/                # PLAN mode skill
-    parallax-debug/               # DEBUG mode skill
-    horizon/                      # Horizon autonomous supervisor skill
-  scripts/
-    install.mjs                   # Local install script
-    publish.mjs                   # npm publish script
+```text
+OpenCode
+  ├── Parallax and Horizon agent prompts
+  ├── mode skills (plan and debug)
+  └── parallax-opencode plugin
+       ├── session-aware protocol write gate
+       ├── changed-file batching
+       ├── bounded project-check detection
+       ├── schema-v2 receipt ledger and traces
+       ├── Parallax mode, analysis, health, and trace tools
+       └── Horizon plan/state/research/decision/skill/evaluation tools
 ```
 
----
+`parallax_checkin` records readiness steps in order: `ambiguity`, `invariants`, `gate`, optional `design`, `commit`, and `summary`. The pre-change gate records that the work is understood; it is not post-change proof. The `strictness` setting changes how early the runtime blocks a non-compliant write; it does not define a different agent workflow. `parallax_verify` claims the pending changed-file batch and appends the observed verification receipt.
+
+Project checks are selected without evaluating package metadata or interpolating user input into a shell. For Node projects, Parallax chooses the first declared script in this order: `verify`, `test`, `typecheck`, `check`, `lint`, `build`, and uses the declared or lockfile-selected package manager. Cargo and Python use fixed argument-separated checks. The default timeout is 120 seconds and output is bounded.
+
+## Tool reference
+
+### Parallax
+
+- `parallax_checkin`, `parallax_verify`, `parallax_health`
+- `parallax_plan`, `parallax_build`, `parallax_debug`, `parallax_horizon`
+- `parallax_analyze`, `parallax_hyperplan`
+- `parallax_trace_export`, `parallax_trace_view`, `parallax_trace_pr_comment`
+
+Hyperplan generates an optional three-round adversarial review (analysis, cross-attack, defense) and synthesizes supplied findings. OpenCode's available `task` tool performs any sub-agent dispatch; Hyperplan itself does not run agents.
+
+### Horizon
+
+Horizon is a context-efficient sequential supervisor. For each atomic feature it dispatches only packaged `horizon-worker`, waits for completion and an observed schema-v2 receipt, dispatches only packaged read-only `horizon-auditor`, waits again, then accepts or sends one corrective worker. At most one delegated task is active; overlap and parallel dispatch are forbidden. Full implementation/audit detail remains in child sessions and archived traces while each child returns a structured summary of at most 2,000 characters. A feature is ready only with persisted receipt ID + `pass` verdict evidence and an independent auditor acceptance; evaluator scores cannot set verification or readiness.
+
+Horizon tools initialize/list/status sessions; read and write plans and state; update features and milestones; append/read decisions; write/read research; create/list session skills; archive traces; persist observed verification/audit evidence; evaluate supplied sub-agent evidence; and read/write Horizon configuration. They persist and score supplied information but do not run continuously or prove correctness.
+
+- Session: `horizon_init_session`, `horizon_list_sessions`, `horizon_session_status`
+- Plan/state: `horizon_write_plan`, `horizon_read_plan`, `horizon_write_state`, `horizon_read_state`
+- Progress: `horizon_update_feature`, `horizon_update_milestone`, `horizon_record_verification`, `horizon_record_audit`
+- Decisions: `horizon_append_decision`, `horizon_read_decisions`
+- Research: `horizon_write_research`, `horizon_read_research`
+- Skills/traces: `horizon_create_skill`, `horizon_list_skills`, `horizon_save_trace`
+- Supervision/config: `horizon_evaluate_subagent`, `horizon_config`
+
+No agent file hardcodes a model, so Horizon and both subagents inherit a model that the user's OpenCode installation can actually run. Users who know that a compatible weaker or cheaper model exists may optionally override either child in `opencode.json`; this is never a portable default:
+
+```json
+{
+  "agent": {
+    "horizon-worker": { "model": "your-provider/compatible-model" },
+    "horizon-auditor": { "model": "your-provider/compatible-model" }
+  }
+}
+```
+
+Do not copy an example model identifier blindly: tool support, permissions, context limits, and provider availability must be compatible with the child role.
+
+## CLI and ESM API
+
+The `parallax` binary provides CI and trace automation:
+
+```bash
+parallax gate --min-score 70
+parallax pre-commit
+parallax trace list
+parallax trace report --week
+parallax doctor --json
+```
+
+Documented ESM entrypoints:
+
+```js
+import plugin, { plugin as namedPlugin } from "parallax-opencode"
+import { runVerification, verifyAndRecord } from "parallax-opencode/verification"
+```
+
+The default and named plugin exports are the same function. These imports are tested from an installed npm tarball, not from the source tree.
+
+## Reproduce the release proof
+
+From a clean checkout:
+
+```bash
+npm ci --ignore-scripts
+npm run typecheck
+npm test -- --coverage
+npm run build:all
+npm run test:pack
+npm run test:opencode
+npm run audit:release
+```
+
+`test:pack` creates the tarball in a temporary directory, rejects development/runtime files, installs it into a temporary prefix, imports the public ESM API, runs the installed CLI, and exercises the installed lifecycle receipt. `test:opencode` packs and installs the same release surface into an isolated config/home, launches the locked OpenCode 1.18.x binary without credentials or user plugins, and verifies tool discovery. Temporary tarballs and test homes are deleted on completion.
+
+`npm run release:check` runs this fail-closed release gate. Tag publication uses the same gate in [`.github/workflows/publish.yml`](.github/workflows/publish.yml).
+
+## Repository map
+
+```text
+agents/                  installed OpenCode agent definitions
+skills/                  installed progressive mode guidance
+src/plugin.ts            OpenCode hooks and tool surface
+src/verification.ts      changed-file queue and durable receipt ledger
+src/config.ts            validated project configuration
+src/detect.ts            deterministic project-check discovery/execution
+src/horizon.ts           durable Horizon persistence
+src/hyperplan.ts         optional adversarial plan hardening
+src/trace.ts             session trace recording/export
+src/score.ts             evidence-calibrated coherence scoring
+src/cli.ts               CI, lifecycle, and trace CLI
+src/tests/               product, runtime, lifecycle, and regression tests
+scripts/install.mjs      side-effect-free explicit installer lifecycle
+scripts/pack-smoke.mjs   packed artifact contract
+scripts/opencode-e2e.mjs real OpenCode packed-plugin integration
+scripts/publish.mjs      local release preflight and publication
+```
+
+Generated `dist/`, `dist-standalone/`, `coverage/`, package tarballs, dependencies, caches, and runtime state stay out of version control.
 
 ## Troubleshooting
 
-### Plugin not loading / tools not showing
+**Plugin or tools do not appear**
 
-OpenCode resolves plugins via the `exports` field in `package.json`. The plugin requires `"./server"` as an export entry:
+1. Run `npx parallax-opencode@latest doctor --json`.
+2. Confirm `opencode --version` is in the supported 1.18.x line.
+3. Restart OpenCode after install/update.
+4. If OpenCode retained an old package cache, remove only its cached `parallax-opencode` package and restart.
 
-```json
-"exports": {
-  ".": { ... },
-  "./server": { ... }
-}
-```
+**A project check is skipped**
 
-If you see "plugin not found" or tools are missing, try:
+Declare one supported package script (`verify`, `test`, `typecheck`, `check`, `lint`, or `build`) or run the appropriate targeted check yourself. A skipped receipt intentionally remains non-passing evidence.
 
-```bash
-# Clear OpenCode's Bun cache and reinstall
-rm -rf ~/.cache/opencode/packages/parallax-opencode*
-npx parallax-opencode@latest
-```
+**State appears stale after resuming**
 
-### "failed to list files" / "failed to load sessions" errors
+Inspect `parallax_health` and `parallax_trace_view`. Horizon resumes by reading durable intent and then re-reading the current workspace; persisted intent never overrides current repository evidence.
 
-These errors come from **OpenCode core**, not this plugin. They typically mean:
+## Contributing and license
 
-- The project directory has permission issues
-- A symlink in the project tree is broken
-- The `.parallax/horizon/` directory is missing or corrupt
-
-**Fix:**
-
-```bash
-# Delete and let the plugin recreate it
-rm -rf ~/.parallax/horizon
-```
-
-The plugin handles missing directories gracefully -- it creates them on first use.
-
-### Protocol state lost between sessions
-
-Protocol state is persisted to `.parallax/state.json` on every checkin. If state appears lost:
-
-1. Check that `.parallax/state.json` exists and is valid JSON
-2. Ensure the plugin process has write access to the project directory
-3. Run `parallax_trace_view` to see what was recorded
-
-### Horizon sessions not appearing
-
-Horizon stores sessions in `~/.parallax/horizon/sessions/<uuid>/`. The session index is at `~/.parallax/horizon/index.json`. If sessions disappear:
-
-1. Check if `index.json` is valid JSON (the plugin auto-recovers from corrupt JSON)
-2. Ensure `~/.parallax/horizon/sessions/` directory exists
-3. Run `horizon_list_sessions` to see what the plugin detects
-
----
-
-## License
-
-MIT (c) [@Master0fFate](https://github.com/Master0fFate)
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the verified development loop. MIT © [Master0fFate](https://github.com/Master0fFate).

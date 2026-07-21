@@ -16,7 +16,13 @@
 
 import { join } from "path"
 import { existsSync, appendFileSync, readFileSync, mkdirSync } from "fs"
-import type { ParallaxTrace, PhaseName, ScoreBreakdown, ScoreEntry } from "./types.js"
+import type {
+  ParallaxTrace,
+  PhaseName,
+  ScoreBreakdown,
+  ScoreEntry,
+  VerificationReceipt,
+} from "./types.js"
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -44,6 +50,15 @@ const PHASE_ORDER: PhaseName[] = [
 // Score computation
 // ---------------------------------------------------------------------------
 
+/** A pass only carries confidence when its execution evidence agrees. */
+export function isVerifiedPass(receipt: VerificationReceipt): boolean {
+  return receipt.verdict === "pass" &&
+    typeof receipt.command === "string" && receipt.command.length > 0 &&
+    receipt.exitCode === 0 &&
+    receipt.timedOut === false &&
+    receipt.skipReason === null
+}
+
 /**
  * Compute the coherence score (0-100) from a trace.
  * Handles missing data and partial traces gracefully.
@@ -56,12 +71,17 @@ export function computeCoherenceScore(trace: ParallaxTrace): ScoreBreakdown {
 
   // 2. Verification Integrity (35 points max)
   let verificationIntegrity = 0
-  const writesWithData = trace.writes.filter((w) => w.verification !== "unknown")
-  if (writesWithData.length > 0) {
-    const firstPass = writesWithData.filter(
+  const receiptEvidence = trace.verificationLedger?.receipts
+  if (receiptEvidence?.length) {
+    const passes = receiptEvidence.filter(isVerifiedPass).length
+    // Failed, skipped, unknown, and internally inconsistent receipts all stay
+    // in the denominator and can never inflate confidence.
+    verificationIntegrity = Math.round((passes / receiptEvidence.length) * 35)
+  } else if (trace.writes.length > 0) {
+    const firstPass = trace.writes.filter(
       (w) => w.verification === "pass" && w.frictionRetriesLeft >= 3,
     ).length
-    verificationIntegrity = Math.round((firstPass / writesWithData.length) * 35)
+    verificationIntegrity = Math.round((firstPass / trace.writes.length) * 35)
   }
 
   // 3. Edge Case Coverage (20 points max)

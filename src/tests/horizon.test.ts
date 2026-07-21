@@ -6,6 +6,7 @@
  * skill management, trace archiving, and session listing.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest"
+import { renameSync, writeFileSync } from "fs"
 
 // In-memory mock filesystem
 const mockFs: { exists: Record<string, boolean>; files: Record<string, string> } = {
@@ -75,6 +76,7 @@ import type {
   HorizonMilestone,
   HorizonState,
   HorizonDecision,
+  VerificationReceipt,
 } from "../types"
 
 beforeEach(() => {
@@ -105,7 +107,7 @@ function makeSamplePlan(sessionId: string): HorizonPlan {
             name: "Feature One",
             description: "First feature",
             acceptanceCriteria: "It works",
-            protocolLevel: "none",
+            protocolLevel: "full",
             status: "in_progress",
             order: 1,
             subAgentSessionId: null,
@@ -120,7 +122,7 @@ function makeSamplePlan(sessionId: string): HorizonPlan {
             name: "Feature Two",
             description: "Second feature",
             acceptanceCriteria: "It also works",
-            protocolLevel: "none",
+            protocolLevel: "full",
             status: "pending",
             order: 2,
             subAgentSessionId: null,
@@ -144,6 +146,28 @@ describe("Horizon Config", () => {
     expect(config.autonomyLevel).toBe("full")
     expect(config.maxRetryCycles).toBe(3)
     expect(config.testCommand).toBe("npm test")
+  })
+
+  it("rejects malformed and out-of-range config", () => {
+    expect(() => horizon.validateHorizonConfig(null)).toThrow("JSON object")
+    expect(() => horizon.validateHorizonConfig([])).toThrow("JSON object")
+    expect(() => horizon.saveHorizonConfig({
+      ...horizon.loadHorizonConfig(),
+      maxRetryCycles: 0,
+    })).toThrow("maxRetryCycles")
+    expect(() => horizon.validateHorizonConfig({
+      ...horizon.loadHorizonConfig(),
+      decisionConfidenceThreshold: 2,
+    })).toThrow("decisionConfidenceThreshold")
+    expect(() => horizon.validateHorizonConfig({
+      ...horizon.loadHorizonConfig(),
+      unexpected: true,
+    })).toThrow("Unknown config field")
+
+    const configPath = "/mock-home/.parallax/horizon/config.json"
+    mockFs.exists[configPath] = true
+    mockFs.files[configPath] = "{not-json"
+    expect(() => horizon.loadHorizonConfig()).toThrow("not valid JSON")
   })
 
   it("saves and loads config", () => {
@@ -232,38 +256,54 @@ describe("Horizon Plan Read/Write", () => {
 })
 
 describe("Horizon Feature Updates", () => {
-  it("updates feature status and recalculates stats", () => {
+  it("updates a failed feature status and recalculates stats", () => {
     const plan = makeSamplePlan("test-session")
     horizon.writeHorizonPlan("test-session", plan)
 
-    // Mark f1 as completed
-    const result = horizon.updateHorizonFeature("test-session", "f1", {
-      status: "completed",
-      verification: { passed: true, testResults: null, issues: [], score: 100 },
-    } as any)
+    const result = horizon.updateHorizonFeature("test-session", "f1", { status: "failed" })
 
     expect(result).not.toBeNull()
-    expect(result!.stats.completedFeatures).toBe(1)
+    expect(result!.stats.failedFeatures).toBe(1)
     expect(result!.stats.totalFeatures).toBe(2)
-
-    // Verify the feature was updated
-    const read = horizon.readHorizonPlan("test-session")
-    const f1 = read!.milestones[0].features.find((f) => f.id === "f1")
-    expect(f1!.status).toBe("completed")
-    expect(f1!.verification.passed).toBe(true)
-    expect(f1!.verification.score).toBe(100)
+    expect(result!.milestones[0].features[0].status).toBe("failed")
   })
 
-  it("increments attempts when setting to in_progress", () => {
+  it("starts exactly one new worker session and increments attempts", () => {
     const plan = makeSamplePlan("test-session")
+    plan.milestones[0].features[0].status = "failed"
     horizon.writeHorizonPlan("test-session", plan)
 
-    horizon.updateHorizonFeature("test-session", "f2", { status: "in_progress" } as any)
+    horizon.updateHorizonFeature("test-session", "f2", {
+      status: "in_progress",
+      subAgentSessionId: "worker-1",
+    })
 
     const read = horizon.readHorizonPlan("test-session")
     const f2 = read!.milestones[0].features.find((f) => f.id === "f2")
     expect(f2!.attempts).toBe(1)
     expect(f2!.status).toBe("in_progress")
+    expect(f2!.subAgentSessionId).toBe("worker-1")
+  })
+
+  it("rejects overlapping, missing, and reused worker sessions", () => {
+    const plan = makeSamplePlan("test-session")
+    plan.milestones[0].features[0].subAgentSessionId = "worker-1"
+    horizon.writeHorizonPlan("test-session", plan)
+
+    expect(() => horizon.updateHorizonFeature("test-session", "f2", {
+      status: "in_progress",
+      subAgentSessionId: "worker-2",
+    })).toThrow("only one in-progress feature")
+
+    plan.milestones[0].features[0].status = "failed"
+    horizon.writeHorizonPlan("test-session", plan)
+    expect(() => horizon.updateHorizonFeature("test-session", "f2", {
+      status: "in_progress",
+    })).toThrow("requires its child session ID")
+    expect(() => horizon.updateHorizonFeature("test-session", "f2", {
+      status: "in_progress",
+      subAgentSessionId: "worker-1",
+    })).toThrow("new child session")
   })
 
   it("returns null for nonexistent feature", () => {
@@ -337,6 +377,137 @@ describe("Horizon State Read/Write", () => {
   it("returns null for missing state", () => {
     const state = horizon.readHorizonState("nonexistent")
     expect(state).toBeNull()
+  })
+
+  it("rejects overlapping delegated tasks", () => {
+    expect(() => horizon.writeHorizonState("test-session", {
+      sessionId: "test-session",
+      currentPhase: "execute",
+      activeSubAgents: ["worker-1", "auditor-1"],
+      currentMilestoneId: "m1",
+      currentFeatureId: "f1",
+      lastCheckpoint: null,
+      pausedAt: null,
+      pauseReason: null,
+    })).toThrow("at most one active sub-agent")
+  })
+})
+
+describe("Horizon sequential evidence pipeline", () => {
+  const receipt = (verdict: VerificationReceipt["verdict"]): VerificationReceipt => ({
+    schemaVersion: 2,
+    id: `receipt-${verdict}`,
+    sessionId: "worker-1",
+    source: "manual",
+    startedAt: "2026-01-01T00:00:00Z",
+    command: verdict === "skipped" ? null : "npm",
+    args: verdict === "skipped" ? [] : ["test"],
+    cwd: "/workspace",
+    timeoutMs: 1000,
+    durationMs: 10,
+    exitCode: verdict === "pass" ? 0 : verdict === "fail" ? 1 : null,
+    verdict,
+    changedFiles: ["src/a.ts"],
+    stdout: "",
+    stderr: "",
+    combined: "",
+    outputTruncated: false,
+    timedOut: false,
+    skipReason: verdict === "skipped" ? "no check" : verdict === "unknown" ? "interrupted" : null,
+  })
+
+  it("does not let an evaluator score set verification passed or readiness", () => {
+    const plan = makeSamplePlan("test-session")
+    plan.milestones[0].features[0].subAgentSessionId = "worker-1"
+    horizon.writeHorizonPlan("test-session", plan)
+    horizon.recordHorizonEvaluationScore("test-session", "f1", 100)
+    const feature = horizon.readHorizonPlan("test-session")!.milestones[0].features[0]
+    expect(feature.verification).toMatchObject({ passed: false, score: 100 })
+    expect(feature.verification.receiptId).toBeUndefined()
+    expect(horizon.horizonFeatureIsReady(feature)).toBe(false)
+  })
+
+  it("requires worker then receipt then independent auditor before readiness", () => {
+    const plan = makeSamplePlan("test-session")
+    plan.milestones[0].features[0].subAgentSessionId = "worker-1"
+    horizon.writeHorizonPlan("test-session", plan)
+
+    expect(() => horizon.recordHorizonAudit(
+      "test-session", "f1", "accept", "auditor-1", "looks good",
+    )).toThrow("requires the current worker's observed schema-v2 receipt")
+
+    horizon.recordHorizonVerificationReceipt("test-session", "f1", receipt("pass"), "changed src/a.ts")
+    let feature = horizon.readHorizonPlan("test-session")!.milestones[0].features[0]
+    expect(feature.verification).toMatchObject({ passed: true, receiptId: "receipt-pass", verdict: "pass" })
+    expect(horizon.horizonFeatureIsReady(feature)).toBe(false)
+    expect(() => horizon.recordHorizonVerificationReceipt(
+      "test-session", "f1", receipt("pass"),
+    )).toThrow("already persisted")
+
+    expect(() => horizon.updateHorizonFeature(
+      "test-session", "f1", { status: "completed" },
+    )).toThrow("Completion requires")
+    expect(() => horizon.recordHorizonAudit(
+      "test-session", "f1", "accept", "worker-1", "self audit",
+    )).toThrow("independent")
+    horizon.recordHorizonAudit("test-session", "f1", "accept", "auditor-1", "accepted", "audit-trace")
+    feature = horizon.readHorizonPlan("test-session")!.milestones[0].features[0]
+    expect(horizon.horizonFeatureIsReady(feature)).toBe(true)
+    expect(() => horizon.recordHorizonAudit(
+      "test-session", "f1", "accept", "auditor-2", "duplicate",
+    )).toThrow("already persisted")
+
+    const completed = horizon.updateHorizonFeature("test-session", "f1", { status: "completed" })!
+    expect(completed.milestones[0].features[0]).toMatchObject({
+      status: "completed",
+      subAgentSessionId: "worker-1",
+      verification: { receiptId: "receipt-pass", verdict: "pass", passed: true },
+      audit: { verdict: "accept", subAgentSessionId: "auditor-1" },
+    })
+  })
+
+  it("persists non-pass verdict evidence and bounds child summaries", () => {
+    const plan = makeSamplePlan("test-session")
+    plan.milestones[0].features[0].subAgentSessionId = "worker-1"
+    horizon.writeHorizonPlan("test-session", plan)
+    expect(() => horizon.recordHorizonVerificationReceipt(
+      "test-session", "f1", receipt("unknown"), "x".repeat(2001),
+    )).toThrow("Worker summary exceeds 2000")
+    expect(() => horizon.recordHorizonVerificationReceipt(
+      "test-session", "f1", { ...receipt("unknown"), sessionId: "other-worker" },
+    )).toThrow("does not belong")
+    horizon.recordHorizonVerificationReceipt("test-session", "f1", receipt("unknown"))
+    let feature = horizon.readHorizonPlan("test-session")!.milestones[0].features[0]
+    expect(feature.verification).toMatchObject({ passed: false, receiptId: "receipt-unknown", verdict: "unknown" })
+    expect(() => horizon.recordHorizonAudit(
+      "test-session", "f1", "accept", "auditor-1", "no finding",
+    )).toThrow("cannot accept a non-pass")
+    expect(() => horizon.recordHorizonAudit(
+      "test-session", "f1", "corrective-worker", "auditor-2", "x".repeat(2001),
+    )).toThrow("exceeds 2000")
+    horizon.recordHorizonAudit("test-session", "f1", "corrective-worker", "auditor-1", "verification unavailable")
+    feature = horizon.readHorizonPlan("test-session")!.milestones[0].features[0]
+    expect(feature.status).toBe("pending")
+    expect(horizon.horizonFeatureIsReady(feature)).toBe(false)
+  })
+
+  it("invalidates old receipt and audit evidence when a corrective worker starts", () => {
+    const plan = makeSamplePlan("test-session")
+    plan.milestones[0].features[0].subAgentSessionId = "worker-1"
+    horizon.writeHorizonPlan("test-session", plan)
+    horizon.recordHorizonVerificationReceipt("test-session", "f1", receipt("pass"))
+    horizon.recordHorizonAudit("test-session", "f1", "corrective-worker", "auditor-1", "fix edge case")
+    let feature = horizon.readHorizonPlan("test-session")!.milestones[0].features[0]
+    expect(feature.status).toBe("pending")
+
+    horizon.updateHorizonFeature("test-session", "f1", {
+      status: "in_progress",
+      subAgentSessionId: "worker-2",
+    })
+    feature = horizon.readHorizonPlan("test-session")!.milestones[0].features[0]
+    expect(feature.verification).toMatchObject({ passed: false, receiptId: null, verdict: null })
+    expect(feature.audit).toBeNull()
+    expect(feature.subAgentSessionId).toBe("worker-2")
   })
 })
 
@@ -456,6 +627,28 @@ describe("Horizon Session Listing", () => {
   it("returns empty array when no sessions exist", () => {
     const sessions = horizon.listHorizonSessions()
     expect(sessions).toEqual([])
+  })
+})
+
+describe("Horizon Session Archive", () => {
+  it("finalizes and moves durable session data into the archive", () => {
+    horizon.initHorizonSession("test-session", "Test", "full")
+
+    expect(horizon.archiveHorizonSession("test-session")).toBe(true)
+    expect(mockFs.exists["/mock-home/.parallax/horizon/sessions/test-session"]).toBeFalsy()
+    expect(renameSync).toHaveBeenCalledWith(
+      expect.stringMatching(/sessions[\\/]test-session$/),
+      expect.stringMatching(/sessions[\\/]test-session\.archived$/),
+    )
+
+    const durableWrites = vi.mocked(writeFileSync).mock.calls.map((call) => String(call[1]))
+    expect(durableWrites.some((value) =>
+      value.includes('"status": "completed"') && !value.includes('"completedAt": null'),
+    )).toBe(true)
+    expect(durableWrites.some((value) =>
+      value.includes('"currentPhase": "complete"') && value.includes('"activeSubAgents": []'),
+    )).toBe(true)
+    expect(horizon.listHorizonSessions()[0].meta.status).toBe("completed")
   })
 })
 

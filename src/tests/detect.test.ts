@@ -1,109 +1,176 @@
-/**
- * Tests for project detection logic.
- */
-import { describe, it, expect, vi, beforeEach } from "vitest"
-
-// Mock fs functions used by detectProject
-vi.mock("fs", () => ({
-  existsSync: vi.fn(),
-  readFileSync: vi.fn(),
-}))
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { mkdtempSync, rmSync, writeFileSync } from "fs"
+import { join } from "path"
+import { tmpdir } from "os"
 
 vi.mock("node:child_process", () => ({
   spawnSync: vi.fn(() => ({ status: 0, stdout: "ok", stderr: "" })),
 }))
 
-import { existsSync } from "fs"
 import { spawnSync } from "node:child_process"
-import { detectProject, runVerify } from "../detect.js"
+import {
+  DEFAULT_VERIFY_TIMEOUT_MS,
+  MAX_VERIFY_OUTPUT_CHARS,
+  detectProject,
+  discoverVerification,
+  runVerification,
+  runVerify,
+} from "../detect.js"
 
-// We test the detection logic by manipulating the mocks.
-// Create a test helper that mirrors the logic from plugin.ts.
-type PT = "cargo" | "tsc" | "lint" | "python" | null
+let root: string
 
-function testDetect(files: Record<string, boolean>): PT {
-  const mockExists: typeof existsSync = vi.fn((p) => {
-    const path = typeof p === "string" ? p : String(p)
-    return files[path] === true
-  }) as unknown as typeof existsSync
-
-  // Inline the detection logic from detect.ts to preserve legacy cases.
-  try {
-    if (mockExists("Cargo.toml" as any)) return "cargo"
-    if (mockExists("package.json" as any)) {
-      if (mockExists("tsconfig.json" as any)) return "tsc"
-      return "lint"
-    }
-    if (mockExists("pyproject.toml" as any) || mockExists("requirements.txt" as any)) return "python"
-    return null
-  } catch {
-    return null
-  }
+function file(name: string, contents = ""): void {
+  writeFileSync(join(root, name), contents, "utf8")
 }
 
-describe("Project detection", () => {
+function packageJson(value: Record<string, unknown>): void {
+  file("package.json", JSON.stringify(value))
+}
+
+describe("production verification discovery and execution", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    root = mkdtempSync(join(tmpdir(), "parallax-detect-"))
   })
 
-  it("detects cargo project", () => {
-    const result = testDetect(
-      { "Cargo.toml": true },
+  afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+  it("detects supported projects without requiring installed dependencies", () => {
+    file("Cargo.toml")
+    expect(detectProject(root)).toBe("cargo")
+    rmSync(join(root, "Cargo.toml"))
+    packageJson({ scripts: { test: "vitest run" } })
+    file("tsconfig.json")
+    expect(detectProject(root)).toBe("tsc")
+    rmSync(join(root, "package.json"))
+    rmSync(join(root, "tsconfig.json"))
+    file("pyproject.toml")
+    expect(detectProject(root)).toBe("python")
+  })
+
+  it("chooses a declared script and package manager deterministically", () => {
+    packageJson({
+      packageManager: "pnpm@9.15.0",
+      scripts: { lint: "eslint .", test: "vitest run", verify: "npm test && npm run lint" },
+    })
+    file("package-lock.json")
+    const plan = discoverVerification(root)
+    expect(plan).toMatchObject({
+      packageManager: "pnpm",
+      script: "verify",
+      command: "pnpm",
+      args: ["run", "verify"],
+      cwd: root,
+    })
+  })
+
+  it("uses fixed safe commands for non-Node projects", () => {
+    file("Cargo.toml")
+    expect(discoverVerification(root)).toMatchObject({
+      command: "cargo",
+      args: ["check", "--color=never", "--all-targets", "--all-features"],
+    })
+  })
+
+  it("returns an explicit skipped receipt rather than passing unknown projects", () => {
+    const receipt = runVerification({ directory: root, sessionId: "s", source: "manual" })
+    expect(receipt).toMatchObject({
+      schemaVersion: 2,
+      verdict: "skipped",
+      exitCode: null,
+      command: null,
+      args: [],
+      cwd: root,
+    })
+    expect(receipt.skipReason).toBeTruthy()
+  })
+
+  it("records complete bounded execution evidence", () => {
+    packageJson({ scripts: { test: "vitest run" } })
+    const receipt = runVerification({
+      directory: root,
+      sessionId: "session-1",
+      source: "automatic",
+      changedFiles: ["b.ts", "a.ts", "a.ts"],
+      timeoutMs: 3210,
+    })
+    expect(receipt).toMatchObject({
+      schemaVersion: 2,
+      sessionId: "session-1",
+      source: "automatic",
+      command: "npm",
+      args: ["run", "test"],
+      cwd: root,
+      timeoutMs: 3210,
+      exitCode: 0,
+      verdict: "pass",
+      changedFiles: ["a.ts", "b.ts"],
+      stdout: "ok",
+      skipReason: null,
+    })
+    expect(receipt.durationMs).toBeGreaterThanOrEqual(0)
+    const expectedCommand = process.platform === "win32"
+      ? process.env.ComSpec || "cmd.exe"
+      : "npm"
+    const expectedArgs = process.platform === "win32"
+      ? ["/d", "/s", "/c", "npm", "run", "test"]
+      : ["run", "test"]
+    expect(spawnSync).toHaveBeenCalledWith(
+      expectedCommand,
+      expectedArgs,
+      expect.objectContaining({ cwd: root, timeout: 3210, shell: false }),
     )
-    expect(result).toBe("cargo")
   })
 
-  it("detects TypeScript project (package.json + tsconfig, without requiring node_modules)", () => {
-    const result = testDetect(
-      { "package.json": true, "tsconfig.json": true },
-    )
-    expect(result).toBe("tsc")
+  it("bounds command output and marks truncation", () => {
+    packageJson({ scripts: { test: "test" } })
+    vi.mocked(spawnSync).mockReturnValueOnce({
+      status: 1,
+      stdout: "x".repeat(MAX_VERIFY_OUTPUT_CHARS * 2),
+      stderr: "y".repeat(MAX_VERIFY_OUTPUT_CHARS * 2),
+    } as never)
+    const receipt = runVerification({ directory: root, sessionId: "s", source: "manual" })
+    expect(receipt.verdict).toBe("fail")
+    expect(receipt.combined.length).toBeLessThanOrEqual(MAX_VERIFY_OUTPUT_CHARS)
+    expect(receipt.outputTruncated).toBe(true)
   })
 
-  it("detects JS/lint project (package.json, no tsconfig)", () => {
-    const result = testDetect(
-      { "package.json": true },
-    )
-    expect(result).toBe("lint")
+  it("records timeouts and missing exit codes as unknown rather than pass", () => {
+    packageJson({ scripts: { test: "test" } })
+    const timeout = Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })
+    vi.mocked(spawnSync).mockReturnValueOnce({
+      status: null,
+      stdout: "partial",
+      stderr: "",
+      error: timeout,
+    } as never)
+    const timedOut = runVerification({
+      directory: root,
+      sessionId: "s",
+      source: "automatic",
+      timeoutMs: Number.NaN,
+    })
+    expect(timedOut).toMatchObject({
+      verdict: "unknown",
+      timedOut: true,
+      timeoutMs: DEFAULT_VERIFY_TIMEOUT_MS,
+      exitCode: null,
+    })
+    expect(timedOut.skipReason).toContain("timeout")
+
+    vi.mocked(spawnSync).mockReturnValueOnce({ status: null, stdout: "", stderr: "" } as never)
+    const terminated = runVerification({ directory: root, sessionId: "s", source: "manual" })
+    expect(terminated).toMatchObject({
+      verdict: "unknown",
+      exitCode: null,
+      skipReason: "Verification terminated without an exit code",
+    })
   })
 
-  it("detects Python project (pyproject.toml)", () => {
-    const result = testDetect(
-      { "pyproject.toml": true },
-    )
-    expect(result).toBe("python")
-  })
-
-  it("detects Python project (requirements.txt)", () => {
-    const result = testDetect(
-      { "requirements.txt": true },
-    )
-    expect(result).toBe("python")
-  })
-
-  it("returns null for unknown project", () => {
-    const result = testDetect({})
-    expect(result).toBeNull()
-  })
-
-  it("handles errors gracefully", () => {
-    // The try/catch should return null on any exception
-    const result = testDetect(
-      { "Cargo.toml": true },
-    )
-    // Should be "cargo" since we're not throwing
-    expect(result).toBe("cargo")
-  })
-
-  it("production detectProject detects package projects without node_modules", () => {
-    vi.mocked(existsSync).mockImplementation((p) => String(p) === "package.json" || String(p) === "tsconfig.json")
-    expect(detectProject()).toBe("tsc")
-  })
-
-  it("runVerify uses Node spawnSync instead of Bun", () => {
-    vi.mocked(existsSync).mockImplementation((p) => String(p) === "package.json" || String(p) === "tsconfig.json")
-    const result = runVerify()
-    expect(result?.exitCode).toBe(0)
-    expect(spawnSync).toHaveBeenCalled()
+  it("keeps the legacy adapter without losing non-pass semantics", () => {
+    packageJson({ scripts: { test: "test" } })
+    expect(runVerify(root)?.exitCode).toBe(0)
+    rmSync(join(root, "package.json"))
+    expect(runVerify(root)).toBeNull()
   })
 })

@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "fs"
 import { join } from "path"
-import { tmpdir } from "os"
+import { homedir, tmpdir } from "os"
 
 // We test the plugin's hook behavior by simulating the hooks directly.
 // The plugin exports a factory function that returns hooks + tools.
@@ -23,6 +23,17 @@ function createMockClient() {
       log: vi.fn().mockResolvedValue(undefined),
     },
   }
+}
+
+function executeBefore(
+  hooks: any,
+  input: { tool: string; args?: Record<string, unknown> },
+) {
+  const args = input.args || {}
+  return hooks["tool.execute.before"](
+    { tool: input.tool, sessionID: "current", callID: "test-call" },
+    { args },
+  )
 }
 
 describe("Hook Enforcement Integration", () => {
@@ -173,7 +184,7 @@ describe("Hook Enforcement Integration", () => {
 
       // Attempt a write without ambiguity checkin
       await expect(
-        (hooks as any)["tool.execute.before"]({
+        executeBefore(hooks, {
           tool: "write",
           args: { filePath: "test.ts" },
         })
@@ -205,7 +216,7 @@ describe("Hook Enforcement Integration", () => {
       const hooks = await plugin({ client } as any)
 
       await expect(
-        (hooks as any)["tool.execute.before"]({
+        executeBefore(hooks, {
           tool: "write",
           args: { filePath: "test.ts" },
         })
@@ -236,14 +247,14 @@ describe("Hook Enforcement Integration", () => {
       const hooks = await plugin({ client } as any)
 
       await expect(
-        (hooks as any)["tool.execute.before"]({
+        executeBefore(hooks, {
           tool: "write",
           args: { filePath: "test.ts" },
         })
       ).resolves.toBeUndefined()
     })
 
-    it("should exempt Horizon writes to .parallax/horizon/", async () => {
+    it("should exempt Horizon writes to the documented global persistence root", async () => {
       // Write state with all steps pending (would normally block)
       const state = {
         sessionId: "current",
@@ -272,9 +283,9 @@ describe("Hook Enforcement Integration", () => {
       })
 
       await expect(
-        (hooks as any)["tool.execute.before"]({
+        executeBefore(hooks, {
           tool: "write",
-          args: { filePath: ".parallax/horizon/sessions/test/plan.json" },
+          args: { filePath: join(homedir(), ".parallax", "horizon", "sessions", "test", "plan.json") },
         })
       ).resolves.toBeUndefined()
     })
@@ -306,7 +317,7 @@ describe("Hook Enforcement Integration", () => {
       })
 
       await expect(
-        (hooks as any)["tool.execute.before"]({
+        executeBefore(hooks, {
           tool: "write",
           args: { filePath: "outside/.parallax/horizon/../../escape.json" },
         })
@@ -320,14 +331,14 @@ describe("Hook Enforcement Integration", () => {
 
       // read, grep, glob should pass through
       await expect(
-        (hooks as any)["tool.execute.before"]({
+        executeBefore(hooks, {
           tool: "read",
           args: { filePath: "test.ts" },
         })
       ).resolves.toBeUndefined()
 
       await expect(
-        (hooks as any)["tool.execute.before"]({
+        executeBefore(hooks, {
           tool: "grep",
           args: { pattern: "test" },
         })

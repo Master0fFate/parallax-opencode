@@ -2,6 +2,66 @@
 
 All notable changes to the Parallax Engine will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Packaged mutation-capable `horizon-worker` and read-only `horizon-auditor` subagents with a strict sequential worker → observed receipt → auditor → accept/corrective-worker pipeline.
+- Durable observed receipt/audit evidence tools and release checks covering installed, packed, and real OpenCode agent discovery.
+
+### Changed
+- Horizon task permissions now use a last-match allowlist for only the packaged child roles; advisory evaluator scores can no longer set verification passed or readiness.
+- Child models are inherited by default, with optional compatible user overrides documented instead of assuming a portable cheap model.
+
+## [0.7.3] - 2026-07-21
+
+### Fixed
+
+- Hydrated persisted traces in every real plugin tool/hook context before mutation or export, preventing resumed sessions from replacing prior evidence with an empty trace.
+
+## [0.7.2] - 2026-07-21
+
+### Added
+
+- Packaged dedicated `horizon-worker` and capability-restricted `horizon-auditor` subagents with a strictly sequential worker → receipt → auditor supervision contract.
+- Added receipt-backed Horizon readiness transitions, independent audit evidence, retry-cap enforcement, and complete real-OpenCode agent/tool permission checks.
+
+### Fixed
+
+- Claimed legacy protocol state exactly once so unrelated sessions cannot inherit stale completed gates.
+- Hydrated persisted traces on session resume, removed invalid CommonJS export claims, minimized E2E credentials, reconciled stale managed assets, rejected symlinked install destinations, and aligned the plugin API dependency with OpenCode 1.18.x support.
+
+## [0.7.1] - 2026-07-21
+
+### Added
+- Reproducible packed-artifact and real OpenCode release proof documented from the README first screen through the contributor and publishing workflows.
+- Deterministic prompt-contract regression scans for workflow phases, receipt semantics, permissions, and contradictory claims.
+- Release staging hygiene for runtime state, secrets, caches, coverage, builds, and npm tarballs.
+
+### Changed
+- Redesigned the repository information architecture around a 30-second first task, progressive disclosure, exact configuration defaults, durable state boundaries, and the verified release surface.
+- Unified Parallax, Horizon, plan, debug, and runtime guidance around one preflight-change-verify-receipt contract with compatible question and OpenCode permission rules.
+- Repositioned Horizon as durable, resumable supervision with bounded retries and evidence limits rather than guaranteed background execution.
+- Made coverage part of the local and tagged fail-closed release gate and synchronized package metadata for 0.7.1.
+- Hardened local publication to require npm identity and package ownership, then verify the published version and dist-tag from the registry.
+
+## [0.7.0] - 2026-07-21
+
+### Added
+- Packed-artifact import smoke coverage for the documented plugin and verification ESM entrypoints.
+- Hermetic OpenCode 1.18.x E2E coverage that loads the packed plugin and verifies real tool discovery without user configuration or credentials.
+- Fail-closed CI and npm publish gates covering typecheck, tests, both builds, artifact smoke, OpenCode E2E, and vulnerability audit.
+- Safe installer lifecycle (`install`, `status`, `doctor`, dry-run, `uninstall`, and help) with JSON diagnostics, custom OpenCode roots, atomic writes, backups, and managed-asset ownership.
+- Validated effective Parallax configuration with explicit malformed-config failures.
+- Schema-v2 verification receipt ledger shared by manual and automatic checks.
+- Deterministic Node script/package-manager discovery and bounded verification evidence.
+- Durable changed-file batching with recoverable claims and repair-loop state transitions.
+
+### Changed
+- Updated the OpenCode plugin API and locked E2E CLI to 1.18.4, refreshed build/test dependencies, and declared Node/OpenCode compatibility and support metadata.
+- Synchronized package, runtime CLI, and installer receipt versions at 0.7.0.
+- Skipped, unknown, and inconsistent verification evidence no longer inflates confidence scores.
+- Verification failures preserve repair writes; a later pass restores friction health.
+
 ## [0.6.9] - 2026-06-07
 
 ### Fixed

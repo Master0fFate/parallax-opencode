@@ -48,6 +48,47 @@ export interface ProtocolState {
 // Verification types
 // ---------------------------------------------------------------------------
 
+export type VerificationVerdict = "pass" | "fail" | "skipped" | "unknown"
+export type VerificationSource = "manual" | "automatic"
+
+export interface VerificationCommand {
+  projectType: Exclude<ProjectType, null>
+  packageManager: "npm" | "pnpm" | "yarn" | "bun" | null
+  script: string | null
+  command: string
+  args: string[]
+  cwd: string
+}
+
+/** An immutable, evidence-bearing record for one bounded verification run. */
+export interface VerificationReceipt {
+  schemaVersion: 2
+  id: string
+  sessionId: string
+  source: VerificationSource
+  startedAt: string
+  command: string | null
+  args: string[]
+  cwd: string
+  timeoutMs: number
+  durationMs: number
+  exitCode: number | null
+  verdict: VerificationVerdict
+  changedFiles: string[]
+  stdout: string
+  stderr: string
+  combined: string
+  outputTruncated: boolean
+  timedOut: boolean
+  skipReason: string | null
+}
+
+export interface VerificationLedger {
+  schemaVersion: 2
+  receipts: VerificationReceipt[]
+}
+
+/** @deprecated Prefer VerificationReceipt. Retained for API compatibility. */
 export interface VerifyResult {
   exitCode: number
   stdout: string
@@ -69,7 +110,7 @@ export type PhaseName =
   | "commit_decision"
   | "summary"
 
-export type WriteVerdict = "pass" | "fail" | "skipped" | "unknown"
+export type WriteVerdict = VerificationVerdict
 
 export interface PhaseRecord {
   phase: PhaseName
@@ -82,6 +123,7 @@ export interface WriteRecord {
   timestamp: string
   verification: WriteVerdict
   frictionRetriesLeft: number
+  receiptId?: string
 }
 
 export interface TraceSessionMeta {
@@ -109,6 +151,7 @@ export interface ParallaxTrace {
   session: TraceSessionMeta
   phases: PhaseRecord[]
   writes: WriteRecord[]
+  verificationLedger: VerificationLedger
   metrics: TraceMetrics | null
   coherenceScore: number | null
 }
@@ -155,7 +198,11 @@ export type HorizonPlanStatus = "planning" | "executing" | "completed" | "failed
 
 export type HorizonItemStatus = "pending" | "in_progress" | "completed" | "failed"
 
-export type HorizonProtocolLevel = "none" | "full"
+export type HorizonProtocolLevel = "full"
+
+export type HorizonVerificationVerdict = "pass" | "fail" | "skipped" | "unknown"
+
+export type HorizonAuditVerdict = "accept" | "corrective-worker"
 
 export interface HorizonPlan {
   schemaVersion: string
@@ -198,14 +245,26 @@ export interface HorizonFeature {
   status: HorizonItemStatus
   order: number
   subAgentSessionId: string | null
+  /** Bounded supervisor-facing summary; full implementation stays in child trace. */
+  workerSummary?: string | null
   attempts: number
   maxAttempts: number
   verification: {
+    /** True only when backed by the persisted observed receipt below. */
     passed: boolean
     testResults: string | null
     issues: string[]
+    /** Advisory evaluator score; never determines `passed` or readiness. */
     score: number | null
+    receiptId?: string | null
+    verdict?: HorizonVerificationVerdict | null
   }
+  audit?: {
+    verdict: HorizonAuditVerdict
+    subAgentSessionId: string
+    traceId: string | null
+    summary: string
+  } | null
   skillsRequired: string[]
   skillsGenerated: string[]
 }

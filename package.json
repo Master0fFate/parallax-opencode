@@ -1,25 +1,26 @@
 {
   "name": "parallax-opencode",
-  "version": "0.6.9",
-  "description": "PARALLAX ENGINE plugin for OpenCode -- protocol enforcement, friction-loop verification, mode switching (plan/build/debug/horizon), trace recording, coherence scoring, CI gate, PR-ready trace artifacts, and autonomous long-horizon supervision",
+  "version": "0.7.3",
+  "description": "Verified change loop for OpenCode with protocol preflight, bounded checks, durable receipts, mode skills, and resumable long-running supervision",
   "type": "module",
   "main": "./dist/plugin.js",
   "types": "./dist/plugin.d.ts",
   "exports": {
     ".": {
       "types": "./dist/plugin.d.ts",
-      "import": "./dist/plugin.js",
-      "require": "./dist/plugin.js"
+      "import": "./dist/plugin.js"
     },
     "./server": {
       "types": "./dist/plugin.d.ts",
-      "import": "./dist/plugin.js",
-      "require": "./dist/plugin.js"
+      "import": "./dist/plugin.js"
     },
     "./dist/hyperplan.js": {
       "types": "./dist/hyperplan.d.ts",
-      "import": "./dist/hyperplan.js",
-      "require": "./dist/hyperplan.js"
+      "import": "./dist/hyperplan.js"
+    },
+    "./verification": {
+      "types": "./dist/verification.d.ts",
+      "import": "./dist/verification.js"
     },
     "./package.json": "./package.json"
   },
@@ -35,12 +36,18 @@
     "release": "node scripts/publish.mjs",
     "release:dry": "node scripts/publish.mjs --dry-run",
     "release:patch": "node scripts/publish.mjs --patch",
+    "release:check": "npm run release:metadata && npm run typecheck && npm test -- --coverage && npm run build:all && npm run test:pack && npm run test:opencode && npm run audit:release",
+    "release:metadata": "node scripts/publish.mjs --metadata-only",
+    "prepublishOnly": "npm run release:check",
     "build": "tsc --project tsconfig.build.json",
     "build:standalone": "npx esbuild src/plugin.ts --bundle --outfile=dist-standalone/parallax-engine.js --platform=node --format=esm --external:@opencode-ai/plugin && node -e \"require('fs').copyFileSync('dist/plugin.d.ts', 'dist-standalone/parallax-engine.d.ts')\"",
     "build:all": "npm run build && npm run build:standalone",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:pack": "node scripts/pack-smoke.mjs",
+    "test:opencode": "node scripts/opencode-e2e.mjs",
+    "audit:release": "npm audit --audit-level=high"
   },
   "bin": {
     "parallax": "dist/cli.js",
@@ -55,20 +62,33 @@
     "ai-agent"
   ],
   "license": "MIT",
+  "author": "Master0fFate",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20",
+    "opencode": ">=1.18.0 <1.19.0"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Master0fFate/parallax-opencode.git"
   },
-  "homepage": "https://github.com/Master0fFate/parallax-opencode",
+  "homepage": "https://github.com/Master0fFate/parallax-opencode#readme",
+  "bugs": {
+    "url": "https://github.com/Master0fFate/parallax-opencode/issues"
+  },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.14.20"
+    "@opencode-ai/plugin": "~1.18.4"
   },
   "devDependencies": {
-    "@types/node": "^22.19.19",
-    "@vitest/coverage-v8": "^3.2.4",
+    "@types/node": "^22.20.1",
+    "@vitest/coverage-v8": "^4.1.10",
     "bun-types": "^1.3.14",
-    "esbuild": "^0.27.7",
-    "typescript": "^5.7.0",
-    "vitest": "^3.2.4"
+    "esbuild": "^0.28.1",
+    "opencode-ai": "1.18.4",
+    "typescript": "^5.9.3",
+    "vite": "7.3.6",
+    "vitest": "^4.1.10"
   }
 }

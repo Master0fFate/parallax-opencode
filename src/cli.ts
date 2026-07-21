@@ -19,6 +19,8 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
+import { spawnSync } from "child_process"
+import { fileURLToPath } from "url"
 import { join } from "path"
 import {
   listTraceFiles,
@@ -64,6 +66,11 @@ function showHelp(): void {
   console.log(``)
   console.log(`Commands:`)
   console.log(`  init                  Create .parallax/ directory with defaults`)
+  console.log(`  install [--dry-run]   Safely install/update OpenCode integration`)
+  console.log(`  dry-run               Preview install without changing files`)
+  console.log(`  status [--json]       Show OpenCode registration/asset status`)
+  console.log(`  doctor [--json]       Diagnose versions, config, paths, and assets`)
+  console.log(`  uninstall [--dry-run] Remove only managed integration files`)
   console.log(`  trace list            List all traces`)
   console.log(`  trace show <id>       Show full trace`)
   console.log(`  trace score <id>      Show coherence score`)
@@ -378,24 +385,31 @@ async function cmdTraceCompliance(id: string): Promise<number> {
   return 0
 }
 
-async function cmdGate(): Promise<number> {
-  const args = process.argv.slice(2)
-
+async function cmdGate(args: string[]): Promise<number> {
   let minScore = 70
   let sessionId: string | null = null
 
-  for (let i = 1; i < args.length; i++) {
-    if (args[i] === "--min-score" && args[i + 1]) {
-      const val = parseInt(args[i + 1], 10)
-      if (!isNaN(val) && val >= 0 && val <= 100) {
-        minScore = val
-        i++
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--min-score") {
+      const raw = args[i + 1]
+      const val = raw === undefined ? NaN : Number(raw)
+      if (!Number.isInteger(val) || val < 0 || val > 100) {
+        console.error("--min-score requires an integer from 0 to 100")
+        return 1
       }
-    } else if (args[i] === "--session" && args[i + 1]) {
-      sessionId = args[i + 1]
+      minScore = val
       i++
+    } else if (args[i] === "--session") {
+      if (!args[i + 1] || args[i + 1].startsWith("-")) {
+        console.error("--session requires an ID")
+        return 1
+      }
+      sessionId = args[++i]
     } else if (args[i] === "--last") {
       // --last is the default behavior
+    } else {
+      console.error(`Unknown argument: ${args[i]}`)
+      return 1
     }
   }
 
@@ -444,6 +458,19 @@ async function cmdGate(): Promise<number> {
   return 1
 }
 
+function cmdLifecycle(command: string, args: string[]): number {
+  const installer = fileURLToPath(new URL("../scripts/install.mjs", import.meta.url))
+  const result = spawnSync(process.execPath, [installer, command, ...args], {
+    stdio: "inherit",
+    env: process.env,
+  })
+  if (result.error) {
+    console.error(`Failed to run lifecycle command: ${result.error.message}`)
+    return 1
+  }
+  return result.status ?? 1
+}
+
 async function cmdPreCommit(): Promise<number> {
   const gitDir = join(process.cwd(), ".git")
   if (!existsSync(gitDir)) {
@@ -489,53 +516,71 @@ export async function main(): Promise<number> {
 
   switch (cmd) {
     case "help":
+    case "--help":
+    case "-h":
+      if (args.length !== 1) { console.error(`Unknown argument: ${args[1]}`); return 1 }
       showHelp()
       return 0
 
     case "version":
     case "--version":
     case "-v":
+      if (args.length !== 1) { console.error(`Unknown argument: ${args[1]}`); return 1 }
       showVersion()
       return 0
 
     case "init":
+      if (args.length !== 1) {
+        console.error(`Unknown argument: ${args[1]}`)
+        return 1
+      }
       return cmdInit()
+
+    case "install":
+    case "dry-run":
+    case "status":
+    case "doctor":
+    case "uninstall":
+      return cmdLifecycle(cmd, args.slice(1))
 
     case "trace": {
       const sub = args[1]
       switch (sub) {
         case "list":
+          if (args.length !== 2) { console.error(`Unknown argument: ${args[2]}`); return 1 }
           return cmdTraceList()
         case "show":
-          if (!args[2]) {
+          if (!args[2] || args.length !== 3) {
             console.error("Usage: parallax trace show <session-id>")
             return 1
           }
           return cmdTraceShow(args[2])
         case "score":
-          if (!args[2]) {
+          if (!args[2] || args.length !== 3) {
             console.error("Usage: parallax trace score <session-id>")
             return 1
           }
           return cmdTraceScore(args[2])
         case "export":
-          if (!args[2]) {
+          if (!args[2] || args.length !== 3) {
             console.error("Usage: parallax trace export <session-id>")
             return 1
           }
           return cmdTraceExport(args[2])
         case "trend":
+          if (args.length !== 2) { console.error(`Unknown argument: ${args[2]}`); return 1 }
           return cmdTraceTrend()
         case "report":
+          if (args.length > 3 || (args[2] && args[2] !== "--week")) { console.error(`Unknown argument: ${args[2]}`); return 1 }
           return cmdTraceReport()
         case "compare":
-          if (!args[2] || !args[3]) {
+          if (!args[2] || !args[3] || args.length !== 4) {
             console.error("Usage: parallax trace compare <session-a> <session-b>")
             return 1
           }
           return cmdTraceCompare(args[2], args[3])
         case "compliance":
-          if (!args[2]) {
+          if (!args[2] || args.length !== 3) {
             console.error("Usage: parallax trace compliance <session-id>")
             return 1
           }
@@ -548,9 +593,10 @@ export async function main(): Promise<number> {
     }
 
     case "gate":
-      return cmdGate()
+      return cmdGate(args.slice(1))
 
     case "pre-commit":
+      if (args.length !== 1) { console.error(`Unknown argument: ${args[1]}`); return 1 }
       return cmdPreCommit()
 
     default:

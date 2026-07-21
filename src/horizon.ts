@@ -34,6 +34,7 @@ import {
   appendFileSync,
   renameSync,
 } from "fs"
+import { randomUUID } from "node:crypto"
 import { homedir } from "os"
 import { basename, join, resolve } from "path"
 
@@ -48,6 +49,8 @@ import type {
   HorizonPlanStatus,
   HorizonFeature,
   HorizonMilestone,
+  HorizonAuditVerdict,
+  VerificationReceipt,
 } from "./types.js"
 
 // ---------------------------------------------------------------------------
@@ -58,6 +61,11 @@ const HORIZON_DIR = join(homedir(), ".parallax", "horizon")
 const SESSIONS_DIR = join(HORIZON_DIR, "sessions")
 const CONFIG_PATH = join(HORIZON_DIR, "config.json")
 const INDEX_PATH = join(HORIZON_DIR, "index.json")
+
+/** Absolute root used by Horizon's documented global persistence store. */
+export function getHorizonDir(): string {
+  return HORIZON_DIR
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -86,13 +94,13 @@ function containedPath(root: string, ...segments: string[]): string {
 }
 
 function writeJsonAtomic(path: string, value: unknown): void {
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
   writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8")
   renameSync(tmp, path)
 }
 
 function writeTextAtomic(path: string, value: string): void {
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
   writeFileSync(tmp, value, "utf8")
   renameSync(tmp, path)
 }
@@ -119,21 +127,52 @@ const DEFAULT_CONFIG: HorizonConfig = {
   lintCommand: "npm run lint",
 }
 
-export function loadHorizonConfig(): HorizonConfig {
-  try {
-    if (existsSync(CONFIG_PATH)) {
-      const raw = readFileSync(CONFIG_PATH, "utf8")
-      return { ...DEFAULT_CONFIG, ...JSON.parse(raw) } as HorizonConfig
-    }
-  } catch {
-    // Invalid JSON or missing file -> use defaults
+const CONFIG_KEYS = new Set(Object.keys(DEFAULT_CONFIG))
+
+export function validateHorizonConfig(value: unknown): HorizonConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("[horizon] Config must be a JSON object")
   }
-  return { ...DEFAULT_CONFIG }
+  const input = value as Record<string, unknown>
+  for (const key of Object.keys(input)) {
+    if (!CONFIG_KEYS.has(key)) throw new Error(`[horizon] Unknown config field: ${key}`)
+  }
+  const merged = { ...DEFAULT_CONFIG, ...input } as Record<string, unknown>
+  if (!["full", "semi", "supervised"].includes(String(merged.autonomyLevel))) {
+    throw new Error("[horizon] autonomyLevel must be full, semi, or supervised")
+  }
+  for (const key of ["autoApproveMilestones", "pauseOnCriticalFailure"]) {
+    if (typeof merged[key] !== "boolean") throw new Error(`[horizon] ${key} must be boolean`)
+  }
+  if (!Number.isInteger(merged.maxRetryCycles) || (merged.maxRetryCycles as number) < 1 || (merged.maxRetryCycles as number) > 100) {
+    throw new Error("[horizon] maxRetryCycles must be an integer between 1 and 100")
+  }
+  if (typeof merged.decisionConfidenceThreshold !== "number" || !Number.isFinite(merged.decisionConfidenceThreshold) || merged.decisionConfidenceThreshold < 0 || merged.decisionConfidenceThreshold > 1) {
+    throw new Error("[horizon] decisionConfidenceThreshold must be between 0 and 1")
+  }
+  for (const key of ["testCommand", "lintCommand"]) {
+    if (typeof merged[key] !== "string" || !(merged[key] as string).trim() || (merged[key] as string).length > 1000) {
+      throw new Error(`[horizon] ${key} must be a non-empty string of at most 1000 characters`)
+    }
+  }
+  return merged as unknown as HorizonConfig
+}
+
+export function loadHorizonConfig(): HorizonConfig {
+  if (!existsSync(CONFIG_PATH)) return { ...DEFAULT_CONFIG }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf8"))
+  } catch (error) {
+    throw new Error(`[horizon] Config is not valid JSON: ${String(error)}`)
+  }
+  return validateHorizonConfig(parsed)
 }
 
 export function saveHorizonConfig(config: HorizonConfig): void {
   ensureDir(HORIZON_DIR)
-  writeJsonAtomic(CONFIG_PATH, config)
+  writeJsonAtomic(CONFIG_PATH, validateHorizonConfig(config))
 }
 
 // ---------------------------------------------------------------------------
@@ -270,9 +309,54 @@ export function updateHorizonFeature(
     const idx = milestone.features.findIndex((f) => f.id === featureId)
     if (idx !== -1) {
       const current = milestone.features[idx]
-      // Increment attempts when transitioning to in_progress
-      if (updates.status === "in_progress" && current.status !== "in_progress") {
-        updates = { ...updates, attempts: (current.attempts || 0) + 1 }
+      if (updates.status === "in_progress") {
+        const workerSessionId = updates.subAgentSessionId?.trim()
+        if (current.status !== "pending") {
+          throw new Error("[horizon] A worker can start only from the pending stage")
+        }
+        if (!workerSessionId) {
+          throw new Error("[horizon] Starting a worker requires its child session ID")
+        }
+        const configuredRetryCap = loadHorizonConfig().maxRetryCycles
+        const featureRetryCap = Number.isInteger(current.maxAttempts) && current.maxAttempts > 0
+          ? current.maxAttempts
+          : configuredRetryCap
+        if (current.attempts >= Math.min(featureRetryCap, configuredRetryCap)) {
+          throw new Error("[horizon] Worker retry cap reached")
+        }
+        const features = plan.milestones.flatMap((entry) => entry.features)
+        if (features.some((feature) => feature.id !== featureId && feature.status === "in_progress")) {
+          throw new Error("[horizon] Sequential pipeline permits only one in-progress feature")
+        }
+        if (features.some((feature) =>
+          feature.subAgentSessionId === workerSessionId || feature.audit?.subAgentSessionId === workerSessionId)) {
+          throw new Error("[horizon] Each delegated worker requires a new child session")
+        }
+        // Starting any initial/corrective worker invalidates evidence from the
+        // previous batch. The new worker must produce a new receipt and audit.
+        updates = {
+          ...updates,
+          subAgentSessionId: workerSessionId,
+          attempts: (current.attempts || 0) + 1,
+          workerSummary: null,
+          verification: {
+            passed: false,
+            testResults: null,
+            issues: [],
+            score: null,
+            receiptId: null,
+            verdict: null,
+          },
+          audit: null,
+        }
+      }
+      if (updates.status === "completed") {
+        if (current.status !== "in_progress" || !horizonFeatureIsReady(current)) {
+          throw new Error("[horizon] Completion requires an observed pass receipt and independent accept audit")
+        }
+        if (updates.subAgentSessionId && updates.subAgentSessionId !== current.subAgentSessionId) {
+          throw new Error("[horizon] Completion cannot replace the worker session ID")
+        }
       }
       milestone.features[idx] = { ...current, ...updates } as HorizonFeature
 
@@ -333,10 +417,130 @@ export function readHorizonState(sessionId: string): HorizonState | null {
 }
 
 export function writeHorizonState(sessionId: string, state: HorizonState): void {
+  if (!Array.isArray(state.activeSubAgents) || state.activeSubAgents.length > 1) {
+    throw new Error("[horizon] Sequential pipeline permits at most one active sub-agent")
+  }
   const dir = sessionDir(sessionId)
   ensureDir(dir)
   state.lastCheckpoint = now()
   writeJsonAtomic(join(dir, "state.json"), state)
+}
+
+// ---------------------------------------------------------------------------
+// Observed verification and independent audit evidence
+// ---------------------------------------------------------------------------
+
+/** Persist verdict evidence copied from a validated workspace schema-v2 receipt. */
+export function recordHorizonVerificationReceipt(
+  sessionId: string,
+  featureId: string,
+  receipt: VerificationReceipt,
+  workerSummary = "",
+): HorizonPlan | null {
+  const plan = readHorizonPlan(sessionId)
+  const feature = plan?.milestones.flatMap((milestone) => milestone.features)
+    .find((candidate) => candidate.id === featureId)
+  if (!feature) return null
+  if (feature.status !== "in_progress" || !feature.subAgentSessionId) {
+    throw new Error("[horizon] Receipt evidence requires the current worker stage")
+  }
+  if (feature.verification.receiptId || feature.audit) {
+    throw new Error("[horizon] Receipt evidence is already persisted for this worker stage")
+  }
+  if (receipt.schemaVersion !== 2 || !["pass", "fail", "skipped", "unknown"].includes(receipt.verdict)) {
+    throw new Error("[horizon] Receipt evidence must use schema v2 with an exact verdict")
+  }
+  if (receipt.sessionId !== feature.subAgentSessionId) {
+    throw new Error("[horizon] Receipt does not belong to the current worker session")
+  }
+  if (plan!.milestones.flatMap((milestone) => milestone.features).some((candidate) =>
+    candidate.id !== featureId && candidate.verification.receiptId === receipt.id)) {
+    throw new Error("[horizon] Receipt evidence is already assigned to another feature")
+  }
+  if (workerSummary.length > 2000) throw new Error("[horizon] Worker summary exceeds 2000 characters")
+  const passed = receipt.verdict === "pass"
+  return updateHorizonFeature(sessionId, featureId, {
+    verification: {
+      ...feature.verification,
+      passed,
+      receiptId: receipt.id,
+      verdict: receipt.verdict,
+      testResults: receipt.command === null
+        ? receipt.skipReason
+        : `${receipt.command} ${receipt.args.join(" ")}`.trim(),
+      issues: passed ? [] : [`Observed verification verdict: ${receipt.verdict}`],
+    },
+    workerSummary,
+    // A new receipt invalidates any audit of an older worker result.
+    audit: null,
+  })
+}
+
+/** Persist a bounded auditor result only after observed receipt evidence exists. */
+export function recordHorizonAudit(
+  sessionId: string,
+  featureId: string,
+  verdict: HorizonAuditVerdict,
+  auditorSessionId: string,
+  summary: string,
+  traceId: string | null = null,
+): HorizonPlan | null {
+  if (!auditorSessionId.trim()) throw new Error("[horizon] auditorSessionId is required")
+  if (summary.length > 2000) throw new Error("[horizon] Auditor summary exceeds 2000 characters")
+  const plan = readHorizonPlan(sessionId)
+  const feature = plan?.milestones.flatMap((milestone) => milestone.features)
+    .find((candidate) => candidate.id === featureId)
+  if (!feature) return null
+  if (feature.status !== "in_progress" || !feature.verification.receiptId || !feature.verification.verdict) {
+    throw new Error("[horizon] Auditor dispatch requires the current worker's observed schema-v2 receipt evidence")
+  }
+  if (feature.audit) {
+    throw new Error("[horizon] An audit is already persisted for this worker stage")
+  }
+  if (feature.subAgentSessionId === auditorSessionId) {
+    throw new Error("[horizon] Auditor must be independent from the worker session")
+  }
+  if (plan!.milestones.flatMap((milestone) => milestone.features).some((candidate) =>
+    candidate.audit?.subAgentSessionId === auditorSessionId ||
+    (candidate.id !== featureId && candidate.subAgentSessionId === auditorSessionId))) {
+    throw new Error("[horizon] Each audit requires a new independent child session")
+  }
+  if (verdict === "accept" && feature.verification.verdict !== "pass") {
+    throw new Error("[horizon] Auditor cannot accept a non-pass verification receipt")
+  }
+  return updateHorizonFeature(sessionId, featureId, {
+    audit: { verdict, subAgentSessionId: auditorSessionId, traceId, summary },
+    // A corrective result re-opens the feature for exactly one next worker;
+    // accept leaves the current receipt-backed stage intact for completion.
+    ...(verdict === "corrective-worker" ? { status: "pending" as const } : {}),
+  })
+}
+
+/** Store an advisory evaluator score without changing receipt-backed evidence. */
+export function recordHorizonEvaluationScore(
+  sessionId: string,
+  featureId: string,
+  score: number,
+): HorizonPlan | null {
+  if (!Number.isFinite(score) || score < 0 || score > 100) {
+    throw new Error("[horizon] Evaluation score must be between 0 and 100")
+  }
+  const plan = readHorizonPlan(sessionId)
+  const feature = plan?.milestones.flatMap((milestone) => milestone.features)
+    .find((candidate) => candidate.id === featureId)
+  if (!feature) return null
+  return updateHorizonFeature(sessionId, featureId, {
+    verification: { ...feature.verification, score },
+  })
+}
+
+/** Acceptance requires both observed passing evidence and an independent audit. */
+export function horizonFeatureIsReady(feature: HorizonFeature): boolean {
+  return feature.verification.passed === true &&
+    feature.verification.verdict === "pass" &&
+    Boolean(feature.verification.receiptId) &&
+    feature.audit?.verdict === "accept" &&
+    feature.audit.subAgentSessionId !== feature.subAgentSessionId
 }
 
 // ---------------------------------------------------------------------------
@@ -381,8 +585,8 @@ export function writeHorizonResearch(
 ): void {
   const dir = join(sessionDir(sessionId), "research")
   ensureDir(dir)
-  writeFileSync(join(dir, "findings.md"), findings, "utf8")
-  writeFileSync(join(dir, "sources.json"), JSON.stringify(sources, null, 2), "utf8")
+  writeTextAtomic(join(dir, "findings.md"), findings)
+  writeJsonAtomic(join(dir, "sources.json"), sources)
 }
 
 export function readHorizonResearch(
@@ -532,17 +736,35 @@ export function getHorizonSessionStatus(
 // ---------------------------------------------------------------------------
 
 export function archiveHorizonSession(sessionId: string): boolean {
-  // Rename session directory with an .archived suffix to indicate completion
-  // without deletion, preserving data for post-hoc audit.
-  const src = sessionDir(sessionId)
-  const dst = sessionDir(`${sessionId}.archived`)
+  const id = assertSafeId("sessionId", sessionId)
+  const src = sessionDir(id)
+  // The source ID was validated above, so appending a fixed suffix is safe.
+  // Do not run the suffixed name through the 128-character external-ID limit.
+  const dst = containedPath(SESSIONS_DIR, `${id}.archived`)
   try {
-    if (!existsSync(src)) return false
-    // Simple rename approach: mark in the index
-    updateIndexEntry(sessionId, (entry) => ({
+    if (!existsSync(src) || existsSync(dst)) return false
+
+    // Finalize durable session metadata before moving the complete directory.
+    const plan = readHorizonPlan(id)
+    if (plan) {
+      plan.status = "completed"
+      plan.completedAt = plan.completedAt || now()
+      writeJsonAtomic(join(src, "plan.json"), plan)
+    }
+    const state = readHorizonState(id)
+    if (state) {
+      state.currentPhase = "complete"
+      state.activeSubAgents = []
+      state.currentMilestoneId = null
+      state.currentFeatureId = null
+      state.lastCheckpoint = now()
+      writeJsonAtomic(join(src, "state.json"), state)
+    }
+    updateIndexEntry(id, (entry) => ({
       ...entry,
       status: "completed" as HorizonPlanStatus,
     }))
+    renameSync(src, dst)
     return true
   } catch {
     return false

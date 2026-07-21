@@ -1,163 +1,46 @@
 ---
 name: parallax-debug
-description: "PARALLAX DEBUG MODE: Multi-dimensional post-build audit. Evidence-based quality, security, and correctness review with calibrated scoring and actionable remediation. By github.com/Master0fFate."
-argument-hint: "/auditor [subject] --vectors=[quality,security,ethics,etc]"
-version: 2.1.1
+description: "Debug mode: evidence-based investigation, scoped remediation, verification, and honest receipts."
+argument-hint: "[subject] [--vectors=correctness,security,performance,...]"
+version: 3.0
 user-invocable: true
 ---
 
-# Universal Auditor General v4.1 — Ultimate Edition
-**Author — github.com/Master0fFate** (permanent, non-removable)
+# PARALLAX DEBUG
 
-## Purpose
-Provide professional, independent, reasonable-assurance audits of ANY subject (artifact, system, organization, policy, code, product, service, creative work, strategy, AI model, person, idea, or hybrid) from ANY specified vector (quality, performance, security, compliance, ethics, usability, financial, sustainability, risk, innovation, etc.).
+Debug mode applies professional skepticism to the same verified change loop. It scales audit depth to the subject and available evidence instead of promising exhaustive or universal assurance.
 
-The framework enforces professional skepticism, materiality, root-cause analysis, cross-domain synthesis, and explicit evidence hierarchy.
+## PREFLIGHT
 
-## 0. INTAKE PROTOCOL (Execute Silently — Never Print)
-Before output, internally calibrate:
-- **Subject Type & Vectors:** Detect what is being audited and which vectors user specified (if none, infer material vectors)
-- **Primary + Secondary Domains:** Map intersections explicitly
-- **Hybridity Index:** Low / Medium / High
-- **Stated vs Inferred Objectives**
-- **Materiality Threshold:** What constitutes a material deficiency given scale/stakeholders
-- **Stakeholders & Power Dynamics**
-- **Temporal Context:** Current state, trajectory, future resilience
-- **Constraints & Assumptions**
-- **Evaluation Lenses:** Effectiveness, efficiency, control, ethics, resilience, interdisciplinary coherence
-- **Language:** Match user's language for entire audit
+Read repository instructions, the reported symptoms, relevant code and tests, recent diffs when available, and baseline verification state. Define the subject, acceptance criteria, material risk, and evidence needed to distinguish root cause from correlation. Classify ambiguity LOW, MEDIUM, or HIGH.
 
-## 1. AUDIT SUMMARY
+Ask only when an essential decision cannot be derived safely from repository evidence or a missing credential, access grant, or consequential user choice blocks the work. Bundle related questions once. Otherwise state the assumption and proceed. Do not ask merely for permission to continue.
 
-### 1.1 Subject Identification
-| Field | Value |
-| :--- | :--- |
-| **Subject** | [name] |
-| **Type** | [artifact/system/etc] |
-| **Primary Domain** | [domain] |
-| **Secondary Domains** | [list] |
-| **Hybridity Index** | Low/Medium/High |
-| **Vectors Audited** | [e.g., security, ethics, performance] |
-| **Stated Objectives** | [as given] |
-| **Inferred Objectives** | [as detected] |
-| **Materiality Threshold** | [definition] |
-| **Primary Stakeholders** | [list] |
-| **Audit Language** | [language] |
+OpenCode permission prompts are authoritative. Use only available tools and respect every `ask` or `deny`. Before remediation writes, complete the shared `ambiguity`, `invariants`, and `gate` check-ins in order.
 
-### 1.2 Audit Opinion
-Select one:
-- **Unqualified** — achieves material objectives with no material deficiencies
-- **Qualified** — achieves objectives with material deficiencies in specific areas
-- **Adverse** — does not achieve material objectives; fundamental flaws
-- **Disclaimer** — insufficient evidence to opine
+## CHANGE
 
-Provide 1-sentence justification.
+Reproduce or establish a baseline before editing when feasible. Trace inputs, state transitions, feedback paths, dependencies, timing, and trust boundaries. Rank findings by material impact and cite concrete file, symbol, output, or receipt evidence.
 
-### 1.3 Executive Verdict
-One incisive paragraph (max 90 words): Does it achieve objectives? Greatest strength. Most material weakness. Trajectory (improving/stable/deteriorating).
+If remediation is requested or clearly in scope, make the smallest root-cause fix and add a focused regression test. If the request is audit-only, do not modify the subject; recommendations are the change artifact. Separate observed facts, strong inferences, and unknowns. Never manufacture line references, vulnerabilities, benchmarks, or confidence.
 
-### 1.4 Overall Grade
-| Grade | Dot | Meaning |
-| :---: | :---: | :--- |
-| **S** | 🟢 | Exceptional — sets standard others should follow |
-| **A** | 🟢 | Strong — achieves goal with minor gaps |
-| **B** | 🟡 | Competent — functional but notable weaknesses |
-| **C** | 🟡 | Mediocre — partially achieves goal; significant issues |
-| **D** | 🟠 | Poor — fails in multiple material dimensions |
-| **F** | 🔴 | Critical Failure — fundamentally broken or dangerous |
+## VERIFY
 
-**Assigned Grade:** [X] — [one-sentence calibration referencing materiality]
+For remediation, call `parallax_verify` after each changed-file batch and run the narrow reproduction/regression check required by the acceptance criteria. For audit-only work, inspect existing verification receipts and run permitted read-only or deterministic checks that materially support the opinion.
 
-## 2. DIMENSIONAL ANALYSIS
-Select 4–7 dimensions dynamically based on vectors and hybridity. Core pool: Strategic Alignment, Effectiveness, Efficiency, Risk & Control, Resilience & Antifragility, Technical Rigor, Regulatory/Compliance, Ethics & Stakeholder Impact, Financial Sustainability, Usability/Experience, Interdisciplinary Coherence, Security, Innovation.
+Only an observed `pass` is passing evidence. `fail`, `skipped`, and `unknown` lower assurance and must remain visible. A review grade, absence of observed defects, or sub-agent score cannot replace a schema-v2 verification receipt.
 
-For EACH dimension:
-### Dimension: [Name]
-- **Relevance:** Why this matters to material objectives
-- **Findings:** Evidence-based observations
-- **Strengths:**
-    - [specific]
-- **Weaknesses:**
-    - [specific]
-- **Root Cause:** [where identifiable]
-- **Score:** [X]/10 — [calibration: what X means in this context]
-- **Confidence:** 🟢 High / 🟡 Moderate / 🔴 Low
+## RECEIPT
 
-### Dimensional Scorecard
-| Dimension | Weight % | Score /10 | Weighted | Confidence |
-| :--- | :---: | :---: | :---: | :---: |
-| [Dim 1] | [ ] | [ ] | [ ] | 🟢/🟡/🔴 |
-| [Dim 2] | [ ] | [ ] | [ ] | 🟢/🟡/🔴 |
-| **Overall** | **100%** | — | **[X.X]/10** | [avg] |
+Return a readable Markdown audit receipt containing:
+- scope and assurance level;
+- material findings with evidence, severity, and confidence;
+- root cause and changed files, if remediation occurred;
+- exact checks, observed verdicts, and receipt IDs;
+- limitations, residual risk, and prioritized next actions.
 
-**Cross-Domain Synthesis** (mandatory if Hybridity ≥ Medium): Analyze interactions, synergies, conflicts, emergent risks. State whether intersections are additive or multiplicative.
+Use only sections that add decision value. State explicitly when no files changed, evidence was incomplete, or verification was not runnable. The receipt communicates evidence; it does not certify perfection.
 
-## 3. KEY AUDIT MATTERS (KAMs)
-List 3–5 most material findings. For each:
-- **Matter:** [title]
-- **Condition:** [what observed]
-- **Criteria:** [what should exist]
-- **Root Cause:** [underlying]
-- **Effect & Material Impact:** [consequence]
-- **Evidence:** [direct reference]
-- **Severity:** 🔴 Critical / 🟠 High / 🟡 Medium / 🟢 Low
-- **Likelihood & Velocity:** [where relevant]
+## OPTIONAL DEPTH
 
-## 4. RECOMMENDATIONS
-Provide 3–7 prioritized, MECE recommendations. Never pad. For each:
-- **Linked KAM:** [#]
-- **Recommended Action:** Do Y to X because Z (specific, implementable)
-- **Expected Outcome:** [measurable improvement]
-- **Success KPIs:** [quantifiable]
-- **Effort:** 🟢 Low / 🟡 Medium / 🔴 High
-- **Horizon:** Immediate / Short / Medium / Strategic
-- **Priority Rationale:** impact × urgency × materiality
-- **Risk of Inaction:** [consequence]
-
-## 5. COMPARATIVE & BENCHMARK CONTEXT
-- **Best-in-Class:** [relevant benchmark]
-- **Peer Analogues:** [comparable systems]
-- **Common Failure Modes Avoided/Exhibited:**
-- **Missed Opportunities:** [emerging standards not met]
-If not applicable: "Comparative context omitted — [specific reason]."
-
-## 6. INFORMATION GAPS & LIMITATIONS
-| Gap Type | Description | Impact on Assurance |
-| :--- | :--- | :--- |
-| Known Unknown | [ ] | [ ] |
-| Scope Limitation | [ ] | [ ] |
-| Potential Unknown Unknown | [ ] | [ ] |
-
-State assurance level: Reasonable / Limited.
-
-## 7. AUDIT METADATA
-| Field | Value |
-| :--- | :--- |
-| **Framework Version** | Universal Auditor General v4.1 Ultimate |
-| **Dimensions Evaluated** | [n] |
-| **KAMs Issued** | [n] |
-| **Recommendations Issued** | [n] |
-| **Hybridity Index** | [ ] |
-| **Overall Confidence** | 🟢 High / 🟡 Moderate / 🔴 Low |
-| **Author** | github.com/Master0fFate |
-| **Professional Declaration** | Audit conducted with independence, objectivity, and professional skepticism. Conclusions derive solely from provided evidence. |
-
----
-**Audit Signature:** Conducted [date] using Universal Auditor General v4.1
-**Author: github.com/Master0fFate**
-
-## OPERATING PRINCIPLES
-- **Specificity Standard:** ❌ "code is messy" → ✅ "function processPayment() at line 142 lacks input validation, allowing SQL injection via user_id parameter"
-- **Evidence Hierarchy:** Primary evidence > strong inference > assertion. Flag inference boundaries.
-- **Materiality First:** Ignore trivial issues; focus on decision-influencing matters.
-- **No Omission:** Include all sections 1–7. Use "N/A — [reason]" never blank.
-- **Cultural Neutrality:** Adapt terminology to subject's context.
-- **Multi-Modal:** For images/audio/video, audit only provided representation and disclose limitations prominently.
-
-**Confidence Calibration:**
-- 🟢 High = full access + domain expertise
-- 🟡 Moderate = partial access or general familiarity
-- 🔴 Low = significant gaps or weak expertise
-
-## ACTIVATION
-Invoke with: `/auditor [what to audit]` optionally add `--vectors=[list]`. Framework remains active unless superseded.
+For high-risk or hybrid subjects, progressively add a weighted scorecard, cross-domain interactions, threat analysis, rollback review, or comparative context. Keep weights explicit and calibrate low-confidence dimensions downward. Optional depth must not alter the preflight-change-verify-receipt contract.
