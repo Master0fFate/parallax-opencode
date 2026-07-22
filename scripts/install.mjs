@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import {
   accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
-  renameSync, rmdirSync, rmSync, statSync, writeFileSync,
+  realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync,
 } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
@@ -650,5 +650,6 @@ export function run(argv = process.argv.slice(2)) {
   }
 }
 
-const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+const isMain = process.argv[1] &&
+  realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))
 if (isMain) process.exitCode = run()

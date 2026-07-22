@@ -1,6 +1,6 @@
 /** Installer lifecycle integration tests use an isolated OpenCode root. */
 import { describe, it, expect } from "vitest"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { spawnSync } from "node:child_process"
@@ -20,6 +20,20 @@ function configAt(root: string): { plugin?: string[]; theme?: string } {
 }
 
 describe("explicit installer lifecycle", () => {
+  it("runs when invoked through a symlinked package path", () => {
+    const f = fixture()
+    try {
+      const linkedPackage = join(f.root, "linked-package")
+      symlinkSync(process.cwd(), linkedPackage, process.platform === "win32" ? "junction" : "dir")
+      const result = spawnSync(process.execPath, [
+        join(linkedPackage, "scripts", "install.mjs"), "install", "--json", "--config-dir", f.config,
+      ], { encoding: "utf8" })
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(JSON.parse(result.stdout)).toMatchObject({ command: "install", installed: true })
+    } finally { f.clean() }
+  })
+
   it("installs into OPENCODE_CONFIG_DIR and repeated install is idempotent", () => {
     const f = fixture()
     try {
