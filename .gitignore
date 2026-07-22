@@ -39,6 +39,7 @@ Thumbs.db
 # Parallax runtime (auto-generated, do not commit)
 .parallax/
 gptaudit.md
+PARALLAX-HARNESS-PORTING-BLUEPRINT.md
 # MCP / runtime databases
 data/*.db
 data/*.sqlite
