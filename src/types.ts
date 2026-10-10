@@ -1,414 +1,136 @@
-/**
- * PARALLAX ENGINE -- Shared Types
- *
- * Central type definitions used across the plugin, trace system, score
- * computation, and CLI.
- *
- * License: MIT
- * Copyright (c) 2026 Master0fFate
- */
+export type Verdict = "pass" | "fail" | "skipped" | "unknown"
 
-// ---------------------------------------------------------------------------
-// Core domain types
-// ---------------------------------------------------------------------------
+export type Strictness = "strict" | "standard" | "relaxed"
 
-export type AgentMode = "free" | "plan" | "build" | "debug" | "horizon"
-
-export type ProtocolStep = "ambiguity" | "invariants" | "gate" | "design" | "commit" | "summary"
-
-export type ProjectType = "cargo" | "tsc" | "lint" | "python" | null
-
-// ---------------------------------------------------------------------------
-// Session store types
-// ---------------------------------------------------------------------------
-
-export interface FrictionState {
-  successes: number
-  trials: number
-  retriesLeft: number
-  lastObservation: string | null
+export interface ParallaxConfig {
+  strictness: Strictness
+  trivialPatterns: string[]
+  highRiskPatterns: string[]
+  timeoutMs: number
 }
 
-export interface ModeState {
-  mode: AgentMode
-}
-
-export interface ProtocolState {
-  ambiguityDone: boolean
-  invariantsDone: boolean
-  gateDone: boolean
-  designDone: boolean
-  commitDone: boolean
-  summaryDone: boolean
-  writesBeforeGate: number
-  gateBlocked: boolean
-}
-
-// ---------------------------------------------------------------------------
-// Verification types
-// ---------------------------------------------------------------------------
-
-export type VerificationVerdict = "pass" | "fail" | "skipped" | "unknown"
-export type VerificationSource = "manual" | "automatic"
-
-export interface VerificationCommand {
-  projectType: Exclude<ProjectType, null>
-  packageManager: "npm" | "pnpm" | "yarn" | "bun" | null
-  script: string | null
+export interface Check {
   command: string
   args: string[]
   cwd: string
 }
 
-/** An immutable, evidence-bearing record for one bounded verification run. */
-export interface VerificationReceipt {
-  schemaVersion: 2
+export interface Receipt {
+  v: 3
   id: string
-  sessionId: string
-  source: VerificationSource
-  startedAt: string
+  session: string
+  at: string
+  cwd: string
   command: string | null
   args: string[]
-  cwd: string
   timeoutMs: number
   durationMs: number
   exitCode: number | null
-  verdict: VerificationVerdict
-  changedFiles: string[]
-  stdout: string
-  stderr: string
-  combined: string
-  outputTruncated: boolean
+  verdict: Verdict
+  files: string[]
+  output: string
+  truncated: boolean
   timedOut: boolean
-  skipReason: string | null
+  reason: string | null
 }
 
-export interface VerificationLedger {
-  schemaVersion: 2
-  receipts: VerificationReceipt[]
+export type Ambiguity = "low" | "medium" | "high"
+
+export type Decision = "full" | "partial" | "hold" | "override"
+
+export interface Preflight {
+  at: string
+  ambiguity: Ambiguity
+  criteria: string
+  invariants: string
 }
 
-/** @deprecated Prefer VerificationReceipt. Retained for API compatibility. */
-export interface VerifyResult {
-  exitCode: number
-  stdout: string
-  stderr: string
-  combined: string
+export interface Session {
+  v: 3
+  id: string
+  agent: string | null
+  preflight: Preflight | null
+  pending: string[]
+  receipts: string[]
+  lastFail: { id: string; output: string } | null
+  closed: { at: string; decision: Decision; summary: string } | null
 }
 
-// ---------------------------------------------------------------------------
-// Trace types -- the core novel feature
-// ---------------------------------------------------------------------------
+export type Autonomy = "full" | "manual"
 
-export type PhaseName =
-  | "ambiguity_check"
-  | "four_invariants"
-  | "verification_gate"
-  | "design_check"
-  | "mode_switch"
-  | "execution"
-  | "commit_decision"
-  | "summary"
+export type FeatureStatus = "pending" | "review" | "completed" | "blocked"
 
-export type WriteVerdict = VerificationVerdict
-
-export interface PhaseRecord {
-  phase: PhaseName
-  timestamp: string
-  data: Record<string, unknown>
-}
-
-export interface WriteRecord {
-  file: string
-  timestamp: string
-  verification: WriteVerdict
-  frictionRetriesLeft: number
-  receiptId?: string
-}
-
-export interface TraceSessionMeta {
-  id: string | null
-  agent: "parallax"
-  agentVersion: string
-  startedAt: string
-  endedAt: string | null
-  project: string | null
-  projectType: string | null
-}
-
-export interface TraceMetrics {
-  durationSeconds: number
-  totalPhases: number
-  totalWrites: number
-  verificationPassRate: number
-  firstAttemptPassRate: number
-  totalFrictionRetries: number
-  protocolStepsCompleted: number
-}
-
-export interface ParallaxTrace {
-  schemaVersion: "1.0"
-  session: TraceSessionMeta
-  phases: PhaseRecord[]
-  writes: WriteRecord[]
-  verificationLedger: VerificationLedger
-  metrics: TraceMetrics | null
-  coherenceScore: number | null
-}
-
-// ---------------------------------------------------------------------------
-// Score types
-// ---------------------------------------------------------------------------
-
-export interface ScoreBreakdown {
-  total: number
-  protocolCoverage: number
-  verificationIntegrity: number
-  edgeCaseCoverage: number
-  timingDiscipline: number
-}
-
-export interface ScoreEntry {
-  sessionId: string
-  date: string
-  score: number
-  project: string | null
-}
-
-// ---------------------------------------------------------------------------
-// CLI types
-// ---------------------------------------------------------------------------
-
-export interface CliCommand {
-  name: string
-  description: string
-  usage: string
-  run: (args: string[]) => Promise<number>
-}
-
-// ---------------------------------------------------------------------------
-// Horizon agent types
-// ---------------------------------------------------------------------------
-
-export type HorizonAutonomyLevel = "full" | "semi" | "supervised"
-
-export type HorizonPhase = "research" | "plan" | "execute" | "audit" | "complete"
-
-export type HorizonPlanStatus = "planning" | "executing" | "completed" | "failed" | "blocked"
-
-export type HorizonItemStatus = "pending" | "in_progress" | "completed" | "failed" | "blocked"
-
-export type HorizonProtocolLevel = "full"
-
-export type HorizonVerificationVerdict = "pass" | "fail" | "skipped" | "unknown"
-
-export type HorizonAuditVerdict = "accept" | "corrective-worker"
-
-export type HorizonRecoveryStrategy = "correct" | "replan" | "research" | "decompose"
-
-export type HorizonBlockerKind =
+export type BlockerKind =
   | "credentials"
-  | "permissions"
   | "external-service"
   | "platform"
   | "framework"
   | "structural"
+  | "permissions"
   | "user-cancelled"
 
-export interface HorizonBlocker {
-  kind: HorizonBlockerKind
+export interface Blocker {
+  kind: BlockerKind
   evidence: string
-  createdAt: string
-  resumable: boolean
-  /** Trusted event provenance when available; legacy blockers may omit it. */
-  source?: "tool" | "session-error" | "permission-event" | "runtime"
+  at: string
+  source: "agent" | "event"
 }
 
-export interface HorizonRecoveryDirective {
-  attempt: number
-  startedAt: string
-  cycle: number
-  strategy: HorizonRecoveryStrategy
-  directive: string
+export type Strategy = "correct" | "replan" | "research" | "decompose"
+
+export interface Attempt {
+  worker: string
+  receipt: string
+  verdict: Verdict
+  summary: string
+  auditor: string | null
+  audit: "accept" | "corrective" | null
+  auditSummary: string | null
 }
 
-export interface HorizonAttemptRecord {
-  attempt: number
-  workerSessionId: string
-  receiptId: string | null
-  auditorSessionId: string | null
+export interface Feature {
+  id: string
+  name: string
+  criteria: string
+  status: FeatureStatus
+  attempts: Attempt[]
+  blocker: Blocker | null
 }
 
-export interface HorizonPlan {
-  schemaVersion: string
-  sessionId: string
-  /** OpenCode session that owns autopilot continuation for this plan. */
-  openCodeSessionId?: string | null
-  /** Canonical workspace root used to prevent cross-project continuation. */
-  workspaceRoot?: string | null
+export interface Milestone {
+  id: string
+  name: string
+  features: Feature[]
+}
+
+export interface Plan {
+  v: 2
+  id: string
+  session: string
+  root: string
   goal: string
-  autonomyLevel: HorizonAutonomyLevel
-  status: HorizonPlanStatus
+  autonomy: Autonomy
   createdAt: string
   completedAt: string | null
-  milestones: HorizonMilestone[]
-  skills: {
-    global: string[]
-    sessionScoped: string[]
-  }
-  stats: {
-    totalFeatures: number
-    completedFeatures: number
-    failedFeatures: number
-    totalRetries: number
-    estimatedCost: number | null
-  }
+  pause: Blocker | null
+  seq: number
+  milestones: Milestone[]
 }
 
-export interface HorizonMilestone {
-  id: string
+export interface Note {
+  at: string
+  kind: "decision" | "research"
+  feature: string | null
+  text: string
+}
+
+export interface FeatureInput {
+  id?: string
   name: string
-  description: string
-  status: HorizonItemStatus
-  order: number
-  requiresApproval: boolean
-  features: HorizonFeature[]
+  criteria: string
 }
 
-export interface HorizonFeature {
-  id: string
+export interface MilestoneInput {
   name: string
-  description: string
-  acceptanceCriteria: string
-  protocolLevel: HorizonProtocolLevel
-  status: HorizonItemStatus
-  order: number
-  subAgentSessionId: string | null
-  /** Bounded supervisor-facing summary; full implementation stays in child trace. */
-  workerSummary?: string | null
-  attempts: number
-  /** @deprecated Compatibility field from schema 1.0. It no longer caps execution. */
-  maxAttempts?: number
-  /** Persisted strategy for the current unbounded recovery attempt. */
-  recovery?: HorizonRecoveryDirective | null
-  /** Immutable identifiers from superseded attempts, used to prevent evidence replay. */
-  attemptHistory?: HorizonAttemptRecord[]
-  /** Present only when work is paused by a proven external or hard product limit. */
-  blocker?: HorizonBlocker | null
-  verification: {
-    /** True only when backed by the persisted observed receipt below. */
-    passed: boolean
-    testResults: string | null
-    issues: string[]
-    /** Advisory evaluator score; never determines `passed` or readiness. */
-    score: number | null
-    receiptId?: string | null
-    verdict?: HorizonVerificationVerdict | null
-  }
-  audit?: {
-    verdict: HorizonAuditVerdict
-    subAgentSessionId: string
-    traceId: string | null
-    summary: string
-  } | null
-  skillsRequired: string[]
-  skillsGenerated: string[]
-}
-
-export interface HorizonState {
-  sessionId: string
-  currentPhase: HorizonPhase
-  activeSubAgents: string[]
-  currentMilestoneId: string | null
-  currentFeatureId: string | null
-  lastCheckpoint: string | null
-  pausedAt: string | null
-  pauseReason: string | null
-  /** Typed evidence required for a durable pause; legacy untyped pauses are resumable. */
-  blocker?: HorizonBlocker | null
-}
-
-export interface HorizonDecision {
-  timestamp: string
-  feature: string
-  ambiguity: string
-  researchResult: string
-  decision: string
-  rationale: string
-  confidence: "high" | "medium" | "low"
-}
-
-export interface HorizonSessionMeta {
-  goal: string
-  createdAt: string
-  status: HorizonPlanStatus
-  autonomyLevel: HorizonAutonomyLevel
-  openCodeSessionId?: string | null
-  workspaceRoot?: string | null
-}
-
-export interface HorizonIndex {
-  sessions: Record<string, HorizonSessionMeta>
-}
-
-export interface HorizonConfig {
-  autonomyLevel: HorizonAutonomyLevel
-  autoApproveMilestones: boolean
-  /** Attempts per adaptive strategy before Horizon escalates to a different approach. */
-  recoveryEscalationInterval: number
-  decisionConfidenceThreshold: number
-  testCommand: string
-  lintCommand: string
-}
-
-// ---------------------------------------------------------------------------
-// Config types
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Hyperplan types -- adversarial plan hardening
-// ---------------------------------------------------------------------------
-
-export type HyperplanMode = "generate" | "synthesize"
-
-export interface HyperplanAngle {
-  id: string
-  name: string
-  attackVector: string
-  instruction: string
-  focusAreas: string[]
-  severity: "critical" | "major" | "minor"
-}
-
-export interface HyperplanCritique {
-  angleId: string
-  angleName: string
-  findings: string
-  severity: "critical" | "major" | "minor"
-  affectedAreas: string[]
-}
-
-export interface HyperplanResult {
-  complexity: "trivial" | "moderate" | "complex"
-  reason: string
-  skipped: boolean
-  angles: HyperplanAngle[]
-  prompts: Array<{ angleId: string; prompt: string }>
-}
-
-export interface HyperplanSynthesis {
-  confidence: number
-  survivingInsights: string[]
-  rejectedCritiques: Array<{ critique: string; reason: string }>
-  hardenedPlan: string
-  summary: string
-}
-
-export interface ParallaxConfig {
-  strictness?: "strict" | "standard" | "relaxed"
-  minScore?: number
-  adaptiveProtocol?: boolean
-  designDocRequired?: boolean
-  trivialPatterns?: string[]
-  highRiskPatterns?: string[]
+  features: FeatureInput[]
 }
