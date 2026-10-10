@@ -2,64 +2,40 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, return-of-opencode]
   pull_request:
     branches: [main]
 
 jobs:
-  quality:
-    name: Node ${{ matrix.node-version }} / ${{ matrix.os }}
+  check:
+    name: Node ${{ matrix.node }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        node-version: [20, 22]
-
+        node: [20, 22]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: ${{ matrix.node }}
           cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:pack
 
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Run tests
-        run: npm test -- --coverage
-
-      - name: Build distributable and standalone plugin
-        run: npm run build:all
-
-      - name: Test packed npm artifact
-        run: npm run test:pack
-
-      - name: Audit release dependency tree
-        run: npm run audit:release
-
-  opencode-e2e:
-    name: OpenCode 1.18 packed-plugin E2E
-    needs: quality
+  opencode:
+    name: Real OpenCode E2E
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Build all package targets
-        run: npm run build:all
-
-      - name: Load packed plugin in hermetic OpenCode
-        run: npm run test:opencode
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm run test:opencode

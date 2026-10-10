@@ -1,48 +1,10 @@
-# Dependencies and package-manager caches
 node_modules/
-.npm/
-.npm-cache/
-.cache/
-
-# Compiled output
 dist/
-dist-standalone/
-
-# Environment and local credentials
+.test-dist/
+.parallax/
+*.tgz
+*.log
 .env
 .env.*
-!.env.example
 .npmrc
-*.pem
-*.key
-
-# Logs and temporary files
-*.log
-npm-debug.log*
-*.tmp
-.tmp/
-tmp/
-
-# Release archives (npm pack output must remain temporary)
-*.tgz
-*.tar.gz
-
-# OS
 .DS_Store
-Thumbs.db
-
-# Editor
-.vscode/settings.json
-*.swp
-*.swo
-
-# Parallax runtime (auto-generated, do not commit)
-.parallax/
-gptaudit.md
-PARALLAX-HARNESS-PORTING-BLUEPRINT.md
-# MCP / runtime databases
-data/*.db
-data/*.sqlite
-
-# Test coverage
-coverage/

@@ -4,6 +4,23 @@ All notable changes to the Parallax Engine will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-10
+
+Rewrite for OpenCode 1.18.35. Smaller, faster, and enforced by the runtime instead of by prompt ceremony.
+
+### Changed
+- Tool surface reduced from 32 to 7: `parallax_preflight`, `parallax_verify`, `parallax_receipt`, `parallax_trace`, `horizon_plan`, `horizon_feature`, `horizon_note`. The six-step check-in protocol is one preflight call that records real content.
+- Agents and skills ship inside the package and are registered through the plugin `config` hook (`agent`, `skills.paths`). The installer only edits the `plugin` array and removes assets copied by earlier versions.
+- Verification runs asynchronously with process-tree kills on timeout; the old synchronous runner blocked the OpenCode server for the whole check. Automatic re-verification after every edit is gone; `parallax_receipt` refuses while edits are unverified instead.
+- Receipts are schema v3 in `.parallax/receipts.jsonl`; session state is one file per session; `.parallax/` ignores itself.
+- The edit gate applies only to sessions running Parallax agents and scales with `strictness`, `trivialPatterns`, and `highRiskPatterns`.
+- Horizon plans are schema v2: features move pending → review → completed through a worker receipt bound by Horizon and an audit recorded by the auditor session itself, so independence is proven by the plugin rather than claimed. Recovery strategy rotates every two failed attempts without an attempt cap.
+- Autopilot pauses propagate from child sessions (a rejected permission in a worker pauses the parent plan) and Horizon may run only one delegated task at a time.
+- Tests run on `node --test`; the only runtime dependency is `@opencode-ai/plugin`.
+
+### Removed
+- Mode tools, skill injection into the system prompt, coherence scoring, trace analytics CLI, hyperplan engine (now a skill), evaluator scores, session-scoped skills, research cache, standalone bundle, `.parallax/config.json` keys `minScore`, `adaptiveProtocol`, `designDocRequired`.
+
 ## [0.7.4] - 2026-07-21
 
 ### Added

@@ -1,17 +1,17 @@
 {
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
     "strict": true,
     "declaration": true,
-    "declarationDir": "dist",
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["bun-types"],
-    "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "noUncheckedIndexedAccess": false
   },
   "include": ["src"],
-  "exclude": ["dist", "node_modules"]
+  "exclude": ["src/tests", "dist", "node_modules"]
 }
