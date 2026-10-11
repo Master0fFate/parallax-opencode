@@ -1,6 +1,6 @@
 {
   "name": "parallax-opencode",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Verified change loop for OpenCode: preflight gate, bounded project checks with durable receipts, and Horizon, a resumable supervisor for long-running goals",
   "type": "module",
   "main": "./dist/plugin.js",
