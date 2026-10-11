@@ -4,6 +4,11 @@ All notable changes to the Parallax Engine will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-11
+
+### Fixed
+- `npx parallax-opencode` did nothing on macOS and Linux: the installer compared its own path without resolving symlinks, so runs through `node_modules/.bin` or a symlinked temp directory skipped the entrypoint.
+
 ## [1.0.0] - 2026-10-10
 
 Rewrite for OpenCode 1.18.35. Smaller, faster, and enforced by the runtime instead of by prompt ceremony.

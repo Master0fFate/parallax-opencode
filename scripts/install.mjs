@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash, randomBytes } from "node:crypto"
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { homedir, platform } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
@@ -280,4 +280,4 @@ export async function run(argv = process.argv.slice(2)) {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exitCode = await run()
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) process.exitCode = await run()
