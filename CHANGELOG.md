@@ -4,6 +4,12 @@ All notable changes to the Parallax Engine will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-10-11
+
+### Changed
+- CI and publish workflows use `actions/checkout@v6` and `actions/setup-node@v6`, which run on Node 24 instead of the deprecated Node 20 runtime.
+- Release registry verification waits up to three minutes for npm to make a new version visible.
+
 ## [1.0.1] - 2026-10-11
 
 ### Fixed

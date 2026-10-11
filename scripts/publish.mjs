@@ -51,7 +51,7 @@ function authorize(pkg) {
 
 async function verifyRegistry(pkg, tag) {
   let last
-  for (let attempt = 0; attempt < 10; attempt++) {
+  for (let attempt = 0; attempt < 60; attempt++) {
     try {
       const response = await fetch(`https://registry.npmjs.org/${pkg.name}`, { cache: "no-store", signal: AbortSignal.timeout(10_000) })
       if (!response.ok) throw new Error(`registry HTTP ${response.status}`)
